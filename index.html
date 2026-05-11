@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>3D Slice Painter</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="c" tabindex="0" aria-label="3D paint viewport"></canvas>
+      <div id="hud" class="hud">
+        <div class="hud__mode" role="group" aria-label="Interaction mode">
+          <button type="button" id="mode-paint" class="hud__segment hud__segment--active" aria-pressed="true">
+            Paint
+          </button>
+          <button type="button" id="mode-navigate" class="hud__segment" aria-pressed="false">
+            Navigate
+          </button>
+        </div>
+        <span class="hud__label">Colour</span>
+        <div class="hud__colour-row">
+          <label class="hud__colour-native" title="Spectrum">
+            <span class="visually-hidden">Spectrum</span>
+            <input id="colour-native" type="color" value="#c83730" />
+          </label>
+          <input
+            id="colour-hex"
+            class="hud__hex"
+            type="text"
+            spellcheck="false"
+            maxlength="7"
+            autocomplete="off"
+            aria-label="Colour hex"
+            value="#c83730"
+          />
+        </div>
+        <div id="colour-swatches" class="hud__swatches" aria-label="Recent colours"></div>
+        <span class="hud__label">Brush</span>
+        <label class="hud__row">Size <input id="brush-size" type="range" min="4" max="120" value="32" /></label>
+        <label class="hud__row">Opacity <input id="brush-opacity" type="range" min="5" max="100" value="85" /></label>
+        <label class="hud__row">Hardness <input id="brush-hardness" type="range" min="0" max="100" value="65" /></label>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
