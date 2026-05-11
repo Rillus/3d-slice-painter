@@ -8,37 +8,154 @@
   <body>
     <div id="app">
       <canvas id="c" tabindex="0" aria-label="3D paint viewport"></canvas>
-      <div id="hud" class="hud">
-        <div class="hud__mode" role="group" aria-label="Interaction mode">
-          <button type="button" id="mode-paint" class="hud__segment hud__segment--active" aria-pressed="true">
-            Paint
-          </button>
-          <button type="button" id="mode-navigate" class="hud__segment" aria-pressed="false">
-            Navigate
-          </button>
-        </div>
-        <span class="hud__label">Colour</span>
-        <div class="hud__colour-row">
-          <label class="hud__colour-native" title="Spectrum">
-            <span class="visually-hidden">Spectrum</span>
-            <input id="colour-native" type="color" value="#c83730" />
+      <div class="hud-overlay" aria-hidden="false">
+        <header class="hud-brush hud-panel" aria-label="Brush and colour">
+          <div class="hud-brush__row">
+            <div class="hud-brush__colour" role="group" aria-label="Colour">
+              <span class="hud-brush__name">Colour</span>
+              <div class="hud-brush__colour-row">
+                <button type="button" id="colour-transparent" class="hud__btn hud__btn--compact" title="Erase to transparent">
+                  Clear
+                </button>
+                <label class="hud__colour-native" title="Spectrum">
+                  <span class="visually-hidden">Spectrum</span>
+                  <input id="colour-native" type="color" value="#c83730" />
+                </label>
+                <input
+                  id="colour-hex"
+                  class="hud__hex"
+                  type="text"
+                  spellcheck="false"
+                  maxlength="9"
+                  autocomplete="off"
+                  aria-label="Colour hex (#RRGGBB or #RRGGBBAA)"
+                  value="#c83730"
+                />
+              </div>
+            </div>
+            <label class="hud-brush__item">
+              <span class="hud-brush__name">Size</span>
+              <input id="brush-size" type="range" min="4" max="120" value="32" />
+            </label>
+            <label class="hud-brush__item">
+              <span class="hud-brush__name">Opacity</span>
+              <input id="brush-opacity" type="range" min="5" max="100" value="85" />
+            </label>
+            <label class="hud-brush__item">
+              <span class="hud-brush__name">Hardness</span>
+              <input id="brush-hardness" type="range" min="0" max="100" value="65" />
+            </label>
+          </div>
+          <div id="colour-swatches" class="hud__swatches hud__swatches--toolbar" aria-label="Recent colours"></div>
+        </header>
+
+        <aside class="hud-left hud-panel" aria-label="Tools">
+          <div class="hud__mode" role="group" aria-label="Interaction mode">
+            <button type="button" id="mode-paint" class="hud__segment hud__segment--active" aria-pressed="true">
+              Paint
+            </button>
+            <button type="button" id="mode-navigate" class="hud__segment" aria-pressed="false">Navigate</button>
+          </div>
+          <div class="hud__project-row">
+            <button type="button" id="project-new" class="hud__btn">New project</button>
+            <button type="button" id="project-export" class="hud__btn">Export</button>
+          </div>
+        </aside>
+
+        <aside class="hud-right hud-panel" aria-label="Slices and layers">
+          <span class="hud__label">Slices</span>
+          <div class="hud__row hud__row--slice-label">
+            <span id="slice-active-label" aria-live="polite">Slice 1 / 1</span>
+          </div>
+          <div class="hud__slice-nav">
+            <button type="button" id="slice-prev" class="hud__btn" aria-label="Previous slice" title="Previous slice ([)">
+              Prev slice
+            </button>
+            <button type="button" id="slice-next" class="hud__btn" aria-label="Next slice" title="Next slice (])">
+              Next slice
+            </button>
+          </div>
+          <div class="hud__slice-nav">
+            <button
+              type="button"
+              id="slice-nudge-back"
+              class="hud__btn"
+              aria-label="Move current slice back along stack (local −Z)"
+              title="Along stack toward lower index (−)"
+            >
+              Stack −
+            </button>
+            <button
+              type="button"
+              id="slice-nudge-forward"
+              class="hud__btn"
+              aria-label="Move current slice forward along stack (local +Z)"
+              title="Along stack toward higher index (+)"
+            >
+              Stack +
+            </button>
+          </div>
+          <button type="button" id="slice-add" class="hud__btn hud__btn--block">Add slice</button>
+
+          <span class="hud__label hud__label--sub">Active slice (plane)</span>
+          <div class="hud__grid2">
+            <label class="hud__mini">
+              Pos X
+              <input id="slice-plane-px" type="number" step="0.05" value="0" aria-label="Slice position local X" />
+            </label>
+            <label class="hud__mini">
+              Pos Y
+              <input id="slice-plane-py" type="number" step="0.05" value="0" aria-label="Slice position local Y" />
+            </label>
+            <label class="hud__mini">
+              Scale X
+              <input
+                id="slice-plane-sx"
+                type="number"
+                min="0.05"
+                step="0.05"
+                value="1"
+                aria-label="Slice scale local X"
+              />
+            </label>
+            <label class="hud__mini">
+              Scale Y
+              <input
+                id="slice-plane-sy"
+                type="number"
+                min="0.05"
+                step="0.05"
+                value="1"
+                aria-label="Slice scale local Y"
+              />
+            </label>
+          </div>
+
+          <label class="hud__row hud__row--wrap">
+            <span class="hud__row-label">Spacing (world)</span>
+            <input
+              id="slice-spacing"
+              type="number"
+              min="0.01"
+              step="0.01"
+              value="0.12"
+              aria-label="Distance between adjacent slices in world units"
+            />
           </label>
-          <input
-            id="colour-hex"
-            class="hud__hex"
-            type="text"
-            spellcheck="false"
-            maxlength="7"
-            autocomplete="off"
-            aria-label="Colour hex"
-            value="#c83730"
-          />
-        </div>
-        <div id="colour-swatches" class="hud__swatches" aria-label="Recent colours"></div>
-        <span class="hud__label">Brush</span>
-        <label class="hud__row">Size <input id="brush-size" type="range" min="4" max="120" value="32" /></label>
-        <label class="hud__row">Opacity <input id="brush-opacity" type="range" min="5" max="100" value="85" /></label>
-        <label class="hud__row">Hardness <input id="brush-hardness" type="range" min="0" max="100" value="65" /></label>
+          <label class="hud__row hud__row--wrap">
+            <span class="hud__row-label">Slice facing</span>
+            <select id="slice-orient" class="hud__select" aria-label="Slice stack facing">
+              <option value="pz" selected>+Z world</option>
+              <option value="nz">−Z world</option>
+              <option value="px">+X world</option>
+              <option value="nx">−X world</option>
+              <option value="py">+Y world</option>
+              <option value="ny">−Y world</option>
+              <option value="viewport_action">Match viewport…</option>
+            </select>
+          </label>
+          <button type="button" id="slice-orient-viewport" class="hud__btn hud__btn--block">Match viewport</button>
+        </aside>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

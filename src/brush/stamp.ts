@@ -82,3 +82,59 @@ export function compositeDab(
     }
   }
 }
+
+/**
+ * Soft circular erase: scales existing premultiplied colour and alpha by (1 − stamp×opacity).
+ * Fully transparent when strength reaches 1.
+ */
+export function compositeEraseDab(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  cx: number,
+  cy: number,
+  radiusPx: number,
+  hardness: number,
+  opacity: number,
+): void {
+  const op = Math.max(0, Math.min(1, opacity));
+  if (op <= 0 || radiusPx <= 0) return;
+
+  const r0 = Math.ceil(radiusPx);
+  const x0 = Math.max(0, Math.floor(cx - r0));
+  const y0 = Math.max(0, Math.floor(cy - r0));
+  const x1 = Math.min(width - 1, Math.ceil(cx + r0));
+  const y1 = Math.min(height - 1, Math.ceil(cy + r0));
+
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      const dist = Math.hypot(dx, dy);
+      const stamp = stampAlpha(dist, radiusPx, hardness);
+      const strength = stamp * op;
+      if (strength <= 0) continue;
+
+      const idx = (y * width + x) * 4;
+      const dr = (data[idx] ?? 0) / 255;
+      const dg = (data[idx + 1] ?? 0) / 255;
+      const db = (data[idx + 2] ?? 0) / 255;
+      const da = (data[idx + 3] ?? 0) / 255;
+
+      const factor = 1 - strength;
+      const outA = da * factor;
+      if (outA <= 0) {
+        data[idx] = 0;
+        data[idx + 1] = 0;
+        data[idx + 2] = 0;
+        data[idx + 3] = 0;
+        continue;
+      }
+
+      data[idx] = Math.round(dr * factor * 255);
+      data[idx + 1] = Math.round(dg * factor * 255);
+      data[idx + 2] = Math.round(db * factor * 255);
+      data[idx + 3] = Math.round(outA * 255);
+    }
+  }
+}

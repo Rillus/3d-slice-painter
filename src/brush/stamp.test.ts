@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compositeDab, smoothstep, stampAlpha } from "./stamp.js";
+import { compositeDab, compositeEraseDab, smoothstep, stampAlpha } from "./stamp.js";
 
 describe("smoothstep", () => {
   it("returns 0 at or below the lower edge", () => {
@@ -88,5 +88,19 @@ describe("compositeDab", () => {
     compositeDab(data, w, h, 12, 12, 10, 0.5, 0.6, { r: 0, g: 0, b: 255, a: 255 });
     const afterSecond = data[(12 * w + 12) * 4 + 3] ?? 0;
     expect(afterSecond).toBeGreaterThanOrEqual(afterFirst);
+  });
+});
+
+describe("compositeEraseDab", () => {
+  it("reduces alpha at the centre of a painted dab", () => {
+    const w = 32;
+    const h = 32;
+    const data = new Uint8ClampedArray(w * h * 4);
+    compositeDab(data, w, h, 16, 16, 10, 1, 1, { r: 200, g: 0, b: 0, a: 255 });
+    const before = data[(16 * w + 16) * 4 + 3] ?? 0;
+    compositeEraseDab(data, w, h, 16, 16, 10, 1, 1);
+    const after = data[(16 * w + 16) * 4 + 3] ?? 0;
+    expect(before).toBeGreaterThan(200);
+    expect(after).toBeLessThan(before);
   });
 });

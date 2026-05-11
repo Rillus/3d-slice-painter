@@ -26,5 +26,6 @@ export function createRectOutlineLoop(width: number, height: number, z = 0): THR
 /** World-space Z for slice index `i` in a stack along −Z, uniform gap. */
 export function stackPositionZForIndex(index: number, gapWorld: number): number {
   const g = Math.max(0, gapWorld);
-  return -index * g;
+  const z = -index * g;
+  return z === 0 ? 0 : z;
 }

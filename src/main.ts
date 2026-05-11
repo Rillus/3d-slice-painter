@@ -1,11 +1,27 @@
 import "./style.css";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { compositeDab, type RgbaByte } from "./brush/stamp.js";
+import { compositeDab, compositeEraseDab, type RgbaByte } from "./brush/stamp.js";
 import { dabSpacingForRadius, samplesAlongSegment } from "./brush/strokePath.js";
-import { formatHexRgb, parseHexRgb } from "./colour/hex.js";
+import { formatHexRgb, parseHexRgba, swatchKeyFromRgba } from "./colour/hex.js";
+import { createRectOutlineLoop } from "./slices/outlineGeometry.js";
+import {
+  isCardinalPreset,
+  quaternionFaceReferenceTowardViewer,
+  quaternionForCardinalPreset,
+} from "./slices/orientation.js";
+import { stackNudgeStepWorld, stackPositionScalar } from "./slices/stackPosition.js";
+import { zipSync } from "fflate";
+import {
+  buildProjectManifest,
+  serialiseManifest,
+  slicePngFilename,
+} from "./project/exportBundle.js";
 
 const PAINT_RES = 512;
+const PLANE_W = 2.4;
+const PLANE_H = 2.4;
+const MAX_SLICES = 128;
 const LS_COLOUR = "3dsp.brushColour";
 const LS_SWATCHES = "3dsp.swatches";
 const MAX_SWATCHES = 12;
@@ -25,7 +41,23 @@ const modePaintBtn = document.querySelector<HTMLButtonElement>("#mode-paint");
 const modeNavigateBtn = document.querySelector<HTMLButtonElement>("#mode-navigate");
 const colourNative = document.querySelector<HTMLInputElement>("#colour-native");
 const colourHex = document.querySelector<HTMLInputElement>("#colour-hex");
+const colourTransparentBtn = document.querySelector<HTMLButtonElement>("#colour-transparent");
 const swatchesContainer = document.querySelector<HTMLDivElement>("#colour-swatches");
+const sliceActiveLabel = document.querySelector<HTMLSpanElement>("#slice-active-label");
+const slicePrevBtn = document.querySelector<HTMLButtonElement>("#slice-prev");
+const sliceNextBtn = document.querySelector<HTMLButtonElement>("#slice-next");
+const sliceNudgeBackBtn = document.querySelector<HTMLButtonElement>("#slice-nudge-back");
+const sliceNudgeForwardBtn = document.querySelector<HTMLButtonElement>("#slice-nudge-forward");
+const sliceAddBtn = document.querySelector<HTMLButtonElement>("#slice-add");
+const sliceSpacingInput = document.querySelector<HTMLInputElement>("#slice-spacing");
+const sliceOrientSelect = document.querySelector<HTMLSelectElement>("#slice-orient");
+const sliceOrientViewportBtn = document.querySelector<HTMLButtonElement>("#slice-orient-viewport");
+const slicePlanePxInput = document.querySelector<HTMLInputElement>("#slice-plane-px");
+const slicePlanePyInput = document.querySelector<HTMLInputElement>("#slice-plane-py");
+const slicePlaneSxInput = document.querySelector<HTMLInputElement>("#slice-plane-sx");
+const slicePlaneSyInput = document.querySelector<HTMLInputElement>("#slice-plane-sy");
+const projectNewBtn = document.querySelector<HTMLButtonElement>("#project-new");
+const projectExportBtn = document.querySelector<HTMLButtonElement>("#project-export");
 
 type InteractionMode = "paint" | "navigate";
 let interactionMode: InteractionMode = "paint";
@@ -38,8 +70,9 @@ function loadStoredColour(): void {
   try {
     const h = localStorage.getItem(LS_COLOUR);
     if (!h) return;
-    const p = parseHexRgb(h);
-    if (p) brushColour = { ...p, a: 255 };
+    const p = parseHexRgba(h);
+    if (!p) return;
+    brushColour = { r: p.r, g: p.g, b: p.b, a: p.a };
   } catch {
     /* storage unavailable */
   }
@@ -47,7 +80,7 @@ function loadStoredColour(): void {
 
 function saveColour(): void {
   try {
-    localStorage.setItem(LS_COLOUR, formatHexRgb(brushColour.r, brushColour.g, brushColour.b).toLowerCase());
+    localStorage.setItem(LS_COLOUR, swatchKeyFromRgba(brushColour));
   } catch {
     /* ignore */
   }
@@ -62,7 +95,7 @@ function loadStoredSwatches(): string[] {
     return arr
       .filter((x): x is string => typeof x === "string")
       .map((h) => h.toLowerCase())
-      .filter((h) => parseHexRgb(h) !== null)
+      .filter((h) => parseHexRgba(h) !== null)
       .slice(0, MAX_SWATCHES);
   } catch {
     return [];
@@ -78,28 +111,39 @@ function saveSwatches(): void {
 }
 
 function recordSwatch(hex: string): void {
-  const p = parseHexRgb(hex);
+  const p = parseHexRgba(hex);
   if (!p) return;
-  const key = formatHexRgb(p.r, p.g, p.b).toLowerCase();
+  const key = swatchKeyFromRgba(p);
   swatches = [key, ...swatches.filter((h) => h.toLowerCase() !== key)].slice(0, MAX_SWATCHES);
   saveSwatches();
   renderSwatches();
 }
 
 function syncColourInputs(): void {
-  const hex = formatHexRgb(brushColour.r, brushColour.g, brushColour.b).toLowerCase();
-  if (colourNative) colourNative.value = hex;
-  if (colourHex) colourHex.value = hex;
+  if (colourHex) colourHex.value = swatchKeyFromRgba(brushColour);
+  if (colourNative) {
+    colourNative.value = formatHexRgb(brushColour.r, brushColour.g, brushColour.b).toLowerCase();
+  }
 }
 
-function applyRgb(rgb: { r: number; g: number; b: number }, persistColour: boolean): void {
-  brushColour = { r: rgb.r, g: rgb.g, b: rgb.b, a: 255 };
+function clampByte(n: number): number {
+  return Math.max(0, Math.min(255, Math.round(n)));
+}
+
+function applyRgb(rgb: { r: number; g: number; b: number; a?: number }, persistColour: boolean): void {
+  const a = rgb.a !== undefined ? clampByte(rgb.a) : 255;
+  brushColour = {
+    r: clampByte(rgb.r),
+    g: clampByte(rgb.g),
+    b: clampByte(rgb.b),
+    a,
+  };
   syncColourInputs();
   if (persistColour) saveColour();
 }
 
 function applyHexString(raw: string, persistColour: boolean): boolean {
-  const parsed = parseHexRgb(raw);
+  const parsed = parseHexRgba(raw);
   if (!parsed) return false;
   applyRgb(parsed, persistColour);
   return true;
@@ -110,11 +154,17 @@ function renderSwatches(): void {
   swatchesContainer.replaceChildren();
   const disabled = interactionMode === "navigate";
   for (const hex of swatches) {
+    const c = parseHexRgba(hex);
+    if (!c) continue;
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "hud__swatch";
     btn.disabled = disabled;
-    btn.style.backgroundColor = hex;
+    if (c.a === 0) {
+      btn.classList.add("hud__swatch--erase");
+    } else {
+      btn.style.backgroundColor = `rgba(${c.r},${c.g},${c.b},${c.a / 255})`;
+    }
     btn.setAttribute("aria-label", `Select colour ${hex}`);
     btn.addEventListener("click", () => {
       if (interactionMode !== "paint") return;
@@ -128,26 +178,21 @@ loadStoredColour();
 swatches = loadStoredSwatches();
 syncColourInputs();
 
-const paintCanvas = document.createElement("canvas");
-paintCanvas.width = PAINT_RES;
-paintCanvas.height = PAINT_RES;
-
-function getPaint2d(canvasEl: HTMLCanvasElement): CanvasRenderingContext2D {
-  const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
-  if (!ctx) throw new Error("2D context not available");
-  return ctx;
-}
-
-const paint2d = getPaint2d(paintCanvas);
-
-const paintBuffer = paint2d.createImageData(PAINT_RES, PAINT_RES);
-paintBuffer.data.fill(0);
-paint2d.putImageData(paintBuffer, 0, 0);
-
-function flushPaintTexture(): void {
-  paint2d.putImageData(paintBuffer, 0, 0);
-  texture.needsUpdate = true;
-}
+type SliceState = {
+  mesh: THREE.Mesh;
+  texture: THREE.CanvasTexture;
+  paintCanvas: HTMLCanvasElement;
+  paint2d: CanvasRenderingContext2D;
+  imageData: ImageData;
+  /** Extra translation along the stack axis (world units), relative to nominal grid. */
+  alongStackOffset: number;
+  /** In-plane translation in mesh local X / Y (world units after stack rotation). */
+  planeOffsetX: number;
+  planeOffsetY: number;
+  /** Local scale on the slice quad (multiplier). */
+  planeScaleX: number;
+  planeScaleY: number;
+};
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1d23);
@@ -164,23 +209,317 @@ const renderer = new THREE.WebGLRenderer({
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-const texture = new THREE.CanvasTexture(paintCanvas);
-texture.colorSpace = THREE.SRGBColorSpace;
-texture.wrapS = THREE.ClampToEdgeWrapping;
-texture.wrapT = THREE.ClampToEdgeWrapping;
-texture.minFilter = THREE.LinearMipmapLinearFilter;
-texture.magFilter = THREE.LinearFilter;
-texture.generateMipmaps = true;
+const planeGeo = new THREE.PlaneGeometry(PLANE_W, PLANE_H);
 
-const planeGeo = new THREE.PlaneGeometry(2.4, 2.4);
-const planeMat = new THREE.MeshBasicMaterial({
-  map: texture,
-  transparent: true,
-  depthWrite: true,
-  side: THREE.DoubleSide,
-});
-const planeMesh = new THREE.Mesh(planeGeo, planeMat);
-scene.add(planeMesh);
+const slices: SliceState[] = [];
+let activeSliceIndex = 0;
+let sliceSpacingWorld = 0.12;
+const sliceStackRotation = new THREE.Quaternion();
+
+function getPaint2d(canvasEl: HTMLCanvasElement): CanvasRenderingContext2D {
+  const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("2D context not available");
+  return ctx;
+}
+
+function createSliceState(): SliceState {
+  const paintCanvas = document.createElement("canvas");
+  paintCanvas.width = PAINT_RES;
+  paintCanvas.height = PAINT_RES;
+  const paint2d = getPaint2d(paintCanvas);
+  const imageData = paint2d.createImageData(PAINT_RES, PAINT_RES);
+  imageData.data.fill(0);
+  paint2d.putImageData(imageData, 0, 0);
+
+  const texture = new THREE.CanvasTexture(paintCanvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = true;
+
+  const mat = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: true,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(planeGeo, mat);
+  scene.add(mesh);
+
+  return {
+    mesh,
+    texture,
+    paintCanvas,
+    paint2d,
+    imageData,
+    alongStackOffset: 0,
+    planeOffsetX: 0,
+    planeOffsetY: 0,
+    planeScaleX: 1,
+    planeScaleY: 1,
+  };
+}
+
+const sliceFrame = new THREE.LineLoop(
+  createRectOutlineLoop(PLANE_W, PLANE_H, 0),
+  new THREE.LineBasicMaterial({ color: 0x000000 }),
+);
+sliceFrame.position.z = 0.002;
+sliceFrame.renderOrder = 2;
+
+function getActiveSlice(): SliceState | undefined {
+  return slices[activeSliceIndex];
+}
+
+function updateSliceTransforms(): void {
+  const gap = sliceSpacingWorld;
+  const worldNormal = new THREE.Vector3(0, 0, 1).applyQuaternion(sliceStackRotation);
+  for (let i = 0; i < slices.length; i++) {
+    const s = slices[i]!;
+    const m = s.mesh;
+    m.quaternion.copy(sliceStackRotation);
+    const scalar = stackPositionScalar(i, gap, s.alongStackOffset);
+    const stackPos = worldNormal.clone().multiplyScalar(scalar);
+    const lateral = new THREE.Vector3(s.planeOffsetX, s.planeOffsetY, 0).applyQuaternion(sliceStackRotation);
+    m.position.copy(stackPos.add(lateral));
+    const sx = Math.min(50, Math.max(0.05, s.planeScaleX));
+    const sy = Math.min(50, Math.max(0.05, s.planeScaleY));
+    m.scale.set(sx, sy, 1);
+  }
+}
+
+function syncSlicePlaneInputsFromActive(): void {
+  const s = getActiveSlice();
+  if (!s) return;
+  if (slicePlanePxInput) slicePlanePxInput.value = String(s.planeOffsetX);
+  if (slicePlanePyInput) slicePlanePyInput.value = String(s.planeOffsetY);
+  if (slicePlaneSxInput) slicePlaneSxInput.value = String(s.planeScaleX);
+  if (slicePlaneSyInput) slicePlaneSyInput.value = String(s.planeScaleY);
+}
+
+function applyActiveSlicePlaneFromInputs(): void {
+  const s = getActiveSlice();
+  if (!s) return;
+  const px = Number(slicePlanePxInput?.value ?? 0);
+  const py = Number(slicePlanePyInput?.value ?? 0);
+  const sx = Number(slicePlaneSxInput?.value ?? 1);
+  const sy = Number(slicePlaneSyInput?.value ?? 1);
+  s.planeOffsetX = Number.isFinite(px) ? px : 0;
+  s.planeOffsetY = Number.isFinite(py) ? py : 0;
+  s.planeScaleX = Number.isFinite(sx) ? Math.min(50, Math.max(0.05, sx)) : 1;
+  s.planeScaleY = Number.isFinite(sy) ? Math.min(50, Math.max(0.05, sy)) : 1;
+  syncSlicePlaneInputsFromActive();
+  updateSliceTransforms();
+}
+
+function nudgeActiveSliceAlongStack(direction: 1 | -1): void {
+  const s = getActiveSlice();
+  if (!s) return;
+  const step = stackNudgeStepWorld(sliceSpacingWorld);
+  s.alongStackOffset += direction * step;
+  updateSliceTransforms();
+}
+
+function applySliceOrientationFromSelect(): void {
+  const v = sliceOrientSelect?.value;
+  if (!v) return;
+  if (v === "viewport_action") {
+    matchSliceOrientationToViewport();
+    return;
+  }
+  if (isCardinalPreset(v)) {
+    sliceStackRotation.copy(quaternionForCardinalPreset(v));
+    updateSliceTransforms();
+  }
+}
+
+function matchSliceOrientationToViewport(): void {
+  sliceStackRotation.copy(quaternionFaceReferenceTowardViewer(controls.target, camera.position));
+  if (sliceOrientSelect) sliceOrientSelect.value = "viewport_action";
+  updateSliceTransforms();
+}
+
+function readSliceSpacingFromInput(): number {
+  const raw = Number(sliceSpacingInput?.value ?? 0.12);
+  if (!Number.isFinite(raw)) return 0.12;
+  return Math.max(0.001, raw);
+}
+
+function refreshSliceSpacingFromInput(): void {
+  sliceSpacingWorld = readSliceSpacingFromInput();
+  updateSliceTransforms();
+}
+
+function attachFrameToActiveSlice(): void {
+  const s = getActiveSlice();
+  if (!s) return;
+  if (sliceFrame.parent) sliceFrame.parent.remove(sliceFrame);
+  s.mesh.add(sliceFrame);
+}
+
+function updateSliceHud(): void {
+  const n = slices.length;
+  const idx = activeSliceIndex + 1;
+  if (sliceActiveLabel) sliceActiveLabel.textContent = `Slice ${idx} / ${n}`;
+  if (slicePrevBtn) slicePrevBtn.disabled = interactionMode === "navigate" || activeSliceIndex <= 0;
+  if (sliceNextBtn) sliceNextBtn.disabled = interactionMode === "navigate" || activeSliceIndex >= n - 1;
+  if (sliceAddBtn) sliceAddBtn.disabled = interactionMode === "navigate" || n >= MAX_SLICES;
+  if (sliceSpacingInput) sliceSpacingInput.disabled = interactionMode === "navigate";
+  if (sliceOrientSelect) sliceOrientSelect.disabled = interactionMode === "navigate";
+  if (sliceOrientViewportBtn) sliceOrientViewportBtn.disabled = interactionMode === "navigate";
+  if (sliceNudgeBackBtn) sliceNudgeBackBtn.disabled = interactionMode === "navigate";
+  if (sliceNudgeForwardBtn) sliceNudgeForwardBtn.disabled = interactionMode === "navigate";
+  for (const el of [slicePlanePxInput, slicePlanePyInput, slicePlaneSxInput, slicePlaneSyInput]) {
+    if (el) el.disabled = interactionMode === "navigate";
+  }
+  syncSlicePlaneInputsFromActive();
+}
+
+function setActiveSliceIndex(next: number): void {
+  const n = slices.length;
+  if (n === 0) return;
+  activeSliceIndex = Math.max(0, Math.min(n - 1, next));
+  attachFrameToActiveSlice();
+  updateSliceHud();
+}
+
+function addSlice(): void {
+  if (slices.length >= MAX_SLICES) return;
+  sliceSpacingWorld = readSliceSpacingFromInput();
+  slices.push(createSliceState());
+  activeSliceIndex = slices.length - 1;
+  updateSliceTransforms();
+  attachFrameToActiveSlice();
+  updateSliceHud();
+}
+
+function flushSliceTexture(s: SliceState): void {
+  s.paint2d.putImageData(s.imageData, 0, 0);
+  s.texture.needsUpdate = true;
+}
+
+function disposeSlice(s: SliceState): void {
+  scene.remove(s.mesh);
+  const mat = s.mesh.material;
+  if (mat instanceof THREE.MeshBasicMaterial) {
+    mat.map?.dispose();
+    mat.dispose();
+  }
+}
+
+function imageDataToPngBlob(data: ImageData): Promise<Blob> {
+  const c = document.createElement("canvas");
+  c.width = data.width;
+  c.height = data.height;
+  const ctx = c.getContext("2d");
+  if (!ctx) return Promise.reject(new Error("2D context unavailable"));
+  ctx.putImageData(data, 0, 0);
+  return new Promise((resolve, reject) => {
+    c.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("PNG encoding failed"));
+    }, "image/png");
+  });
+}
+
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function newProject(): void {
+  if (!confirm("Start a new project? All slices and strokes will be cleared.")) return;
+
+  painting = false;
+  lastPaintCanvas = null;
+  if (activePaintPointerId !== null) {
+    try {
+      canvas.releasePointerCapture(activePaintPointerId);
+    } catch {
+      /* not capturing */
+    }
+    activePaintPointerId = null;
+  }
+
+  if (sliceFrame.parent) sliceFrame.parent.remove(sliceFrame);
+  for (const s of slices) disposeSlice(s);
+  slices.length = 0;
+  slices.push(createSliceState());
+  activeSliceIndex = 0;
+  sliceSpacingWorld = 0.12;
+  if (sliceSpacingInput) sliceSpacingInput.value = "0.12";
+  sliceStackRotation.identity();
+  if (sliceOrientSelect) sliceOrientSelect.value = "pz";
+  updateSliceTransforms();
+  attachFrameToActiveSlice();
+  updateSliceHud();
+}
+
+let exportInProgress = false;
+
+async function exportProject(): Promise<void> {
+  if (exportInProgress || slices.length === 0) return;
+  exportInProgress = true;
+  projectExportBtn?.setAttribute("aria-busy", "true");
+  if (projectExportBtn) projectExportBtn.disabled = true;
+  try {
+    const entries: Record<string, Uint8Array> = {};
+    for (let i = 0; i < slices.length; i++) {
+      const s = slices[i];
+      if (!s) continue;
+      const blob = await imageDataToPngBlob(s.imageData);
+      const buf = new Uint8Array(await blob.arrayBuffer());
+      entries[slicePngFilename(i)] = buf;
+    }
+    const orientVal = sliceOrientSelect?.value;
+    const orientationCardinal = orientVal && isCardinalPreset(orientVal) ? orientVal : null;
+    const manifest = buildProjectManifest(
+      {
+        sliceCount: slices.length,
+        spacingWorld: sliceSpacingWorld,
+        canvasSize: PAINT_RES,
+        planeWidthWorld: PLANE_W,
+        planeHeightWorld: PLANE_H,
+        stackQuaternion: {
+          x: sliceStackRotation.x,
+          y: sliceStackRotation.y,
+          z: sliceStackRotation.z,
+          w: sliceStackRotation.w,
+        },
+        orientationCardinal,
+        sliceAlongStackOffsets: slices.map((s) => s.alongStackOffset),
+        slicePlaneOffsetX: slices.map((s) => s.planeOffsetX),
+        slicePlaneOffsetY: slices.map((s) => s.planeOffsetY),
+        slicePlaneScaleX: slices.map((s) => s.planeScaleX),
+        slicePlaneScaleY: slices.map((s) => s.planeScaleY),
+      },
+      new Date().toISOString(),
+    );
+    entries["project.json"] = new TextEncoder().encode(serialiseManifest(manifest));
+    const zipped = zipSync(entries, { level: 6 });
+    const zipBlob = new Blob([zipped], { type: "application/zip" });
+    const stamp = new Date().toISOString().replaceAll(":", "-").replace("T", "_").slice(0, 19);
+    downloadBlob(zipBlob, `slice-painter_${stamp}.zip`);
+  } catch (err) {
+    console.error(err);
+    window.alert(
+      "Export failed. Your browser may be low on memory, or PNG encoding may be unavailable in this context.",
+    );
+  } finally {
+    exportInProgress = false;
+    projectExportBtn?.removeAttribute("aria-busy");
+    if (projectExportBtn) projectExportBtn.disabled = false;
+  }
+}
 
 const grid = new THREE.GridHelper(6, 12, 0x3a4150, 0x2a3038);
 grid.position.y = -1.25;
@@ -225,12 +564,32 @@ function setInteractionMode(mode: InteractionMode): void {
   modeNavigateBtn?.classList.toggle("hud__segment--active", mode === "navigate");
 
   const brushDisabled = mode === "navigate";
-  for (const el of [brushSize, brushOpacity, brushHardness, colourNative, colourHex]) {
+  for (const el of [
+    brushSize,
+    brushOpacity,
+    brushHardness,
+    colourNative,
+    colourHex,
+    slicePrevBtn,
+    sliceNextBtn,
+    sliceAddBtn,
+    sliceSpacingInput,
+    sliceOrientSelect,
+    sliceOrientViewportBtn,
+    sliceNudgeBackBtn,
+    sliceNudgeForwardBtn,
+    slicePlanePxInput,
+    slicePlanePyInput,
+    slicePlaneSxInput,
+    slicePlaneSyInput,
+    colourTransparentBtn,
+  ]) {
     if (el) el.disabled = brushDisabled;
   }
   swatchesContainer?.querySelectorAll<HTMLButtonElement>(".hud__swatch").forEach((b) => {
     b.disabled = brushDisabled;
   });
+  updateSliceHud();
 }
 
 function readBrushParams(): { radiusPx: number; opacity: number; hardness: number } {
@@ -245,11 +604,13 @@ function readBrushParams(): { radiusPx: number; opacity: number; hardness: numbe
 }
 
 function rayToCanvas(clientX: number, clientY: number): { cx: number; cy: number } | null {
+  const active = getActiveSlice();
+  if (!active) return null;
   const rect = canvas.getBoundingClientRect();
   ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(ndc, camera);
-  const hits = raycaster.intersectObject(planeMesh, false);
+  const hits = raycaster.intersectObject(active.mesh, false);
   const hit = hits[0];
   if (!hit?.uv) return null;
   const uv = hit.uv;
@@ -260,23 +621,40 @@ function rayToCanvas(clientX: number, clientY: number): { cx: number; cy: number
 }
 
 function dabCanvas(cx: number, cy: number): void {
+  const active = getActiveSlice();
+  if (!active) return;
   const { radiusPx, opacity, hardness } = readBrushParams();
-  compositeDab(paintBuffer.data, PAINT_RES, PAINT_RES, cx, cy, radiusPx, hardness, opacity, brushColour);
+  const data = active.imageData.data;
+  if (brushColour.a === 0) {
+    compositeEraseDab(data, PAINT_RES, PAINT_RES, cx, cy, radiusPx, hardness, opacity);
+  } else {
+    compositeDab(data, PAINT_RES, PAINT_RES, cx, cy, radiusPx, hardness, opacity, brushColour);
+  }
 }
 
 function strokeCanvas(x0: number, y0: number, x1: number, y1: number, skipFirst: boolean): void {
+  const active = getActiveSlice();
+  if (!active) return;
   const { radiusPx, opacity, hardness } = readBrushParams();
   const step = dabSpacingForRadius(radiusPx);
   const pts = samplesAlongSegment(x0, y0, x1, y1, step);
   const start = skipFirst ? 1 : 0;
+  const data = active.imageData.data;
+  const erase = brushColour.a === 0;
   for (let i = start; i < pts.length; i++) {
     const p = pts[i];
     if (!p) continue;
-    compositeDab(paintBuffer.data, PAINT_RES, PAINT_RES, p.x, p.y, radiusPx, hardness, opacity, brushColour);
+    if (erase) {
+      compositeEraseDab(data, PAINT_RES, PAINT_RES, p.x, p.y, radiusPx, hardness, opacity);
+    } else {
+      compositeDab(data, PAINT_RES, PAINT_RES, p.x, p.y, radiusPx, hardness, opacity, brushColour);
+    }
   }
 }
 
 function processPaintPointer(e: PointerEvent): void {
+  const active = getActiveSlice();
+  if (!active) return;
   const coalesced = e.getCoalescedEvents?.();
   const events = coalesced && coalesced.length > 0 ? coalesced : [e];
   let prev = lastPaintCanvas;
@@ -291,7 +669,7 @@ function processPaintPointer(e: PointerEvent): void {
     prev = p;
   }
   lastPaintCanvas = prev;
-  flushPaintTexture();
+  flushSliceTexture(active);
 }
 
 function resize(): void {
@@ -306,14 +684,69 @@ function resize(): void {
 window.addEventListener("resize", resize);
 resize();
 
+sliceSpacingInput?.addEventListener("input", () => {
+  refreshSliceSpacingFromInput();
+});
+
+sliceSpacingInput?.addEventListener("change", () => {
+  refreshSliceSpacingFromInput();
+});
+
+slicePrevBtn?.addEventListener("click", () => setActiveSliceIndex(activeSliceIndex - 1));
+sliceNextBtn?.addEventListener("click", () => setActiveSliceIndex(activeSliceIndex + 1));
+sliceNudgeBackBtn?.addEventListener("click", () => nudgeActiveSliceAlongStack(-1));
+sliceNudgeForwardBtn?.addEventListener("click", () => nudgeActiveSliceAlongStack(1));
+sliceAddBtn?.addEventListener("click", () => addSlice());
+
+for (const el of [slicePlanePxInput, slicePlanePyInput, slicePlaneSxInput, slicePlaneSyInput]) {
+  el?.addEventListener("input", () => applyActiveSlicePlaneFromInputs());
+  el?.addEventListener("change", () => applyActiveSlicePlaneFromInputs());
+}
+
+window.addEventListener("keydown", (e) => {
+  if (interactionMode !== "paint") return;
+  const t = e.target;
+  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return;
+  if (e.key === "[") {
+    e.preventDefault();
+    setActiveSliceIndex(activeSliceIndex - 1);
+  } else if (e.key === "]") {
+    e.preventDefault();
+    setActiveSliceIndex(activeSliceIndex + 1);
+  }
+});
+
+sliceOrientSelect?.addEventListener("change", () => {
+  applySliceOrientationFromSelect();
+});
+
+sliceOrientViewportBtn?.addEventListener("click", () => {
+  matchSliceOrientationToViewport();
+});
+
+projectNewBtn?.addEventListener("click", () => newProject());
+projectExportBtn?.addEventListener("click", () => {
+  void exportProject();
+});
+
 colourNative?.addEventListener("input", () => {
   if (!colourNative) return;
-  applyHexString(colourNative.value, false);
+  const p = parseHexRgba(colourNative.value);
+  if (!p) return;
+  applyRgb({ r: p.r, g: p.g, b: p.b, a: 255 }, false);
 });
 
 colourNative?.addEventListener("change", () => {
   if (!colourNative) return;
-  if (applyHexString(colourNative.value, true)) recordSwatch(colourNative.value);
+  const p = parseHexRgba(colourNative.value);
+  if (!p) return;
+  applyRgb({ r: p.r, g: p.g, b: p.b, a: 255 }, true);
+  recordSwatch(colourNative.value);
+});
+
+colourTransparentBtn?.addEventListener("click", () => {
+  if (interactionMode !== "paint") return;
+  applyRgb({ r: 0, g: 0, b: 0, a: 0 }, false);
 });
 
 colourHex?.addEventListener("input", () => {
@@ -340,6 +773,12 @@ colourHex?.addEventListener("keydown", (ev) => {
 
 modePaintBtn?.addEventListener("click", () => setInteractionMode("paint"));
 modeNavigateBtn?.addEventListener("click", () => setInteractionMode("navigate"));
+
+slices.push(createSliceState());
+sliceSpacingWorld = readSliceSpacingFromInput();
+updateSliceTransforms();
+attachFrameToActiveSlice();
+updateSliceHud();
 
 setInteractionMode("paint");
 renderSwatches();
