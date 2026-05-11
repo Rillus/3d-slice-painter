@@ -6,10 +6,14 @@ export type ProjectManifestV1 = {
   planeWidthWorld: number;
   planeHeightWorld: number;
   exportedAt: string;
-  /** World-space stack rotation (local +Z → paint plane normal). */
+  /** World-space stack rotation for slice 0 only (legacy; prefer `sliceStackQuaternions`). */
   stackQuaternion?: { x: number; y: number; z: number; w: number };
+  /** Per-slice stack rotation (local +Z → paint plane normal), same order as PNG indices. */
+  sliceStackQuaternions?: { x: number; y: number; z: number; w: number }[];
   /** Cardinal key when chosen from the list; null or omitted after a viewport snap until a cardinal is picked. */
   orientationCardinal?: string | null;
+  /** Per-slice cardinal preset when applicable; otherwise null (e.g. viewport match). */
+  sliceOrientationCardinals?: (string | null)[];
   /** Per-slice offset along the stack axis (world units), same order as PNG indices. */
   sliceAlongStackOffsets?: number[];
   /** In-plane offset in local X / Y (world units after stack rotation), per slice. */

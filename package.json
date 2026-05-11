@@ -8,10 +8,12 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepare": "husky"
   },
   "devDependencies": {
     "@types/three": "^0.184.1",
+    "husky": "^9.1.7",
     "typescript": "~5.7.2",
     "vite": "^6.0.1",
     "vitest": "^2.1.6"

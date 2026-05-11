@@ -9,9 +9,34 @@
     <div id="app">
       <canvas id="c" tabindex="0" aria-label="3D paint viewport"></canvas>
       <div class="hud-overlay" aria-hidden="false">
-        <header class="hud-brush hud-panel" aria-label="Brush and colour">
+        <div class="hud-dock hud-dock--toolbar" id="hud-dock-toolbar" data-hud-dock="toolbar">
+          <header class="hud-dock__body hud-brush hud-panel" id="hud-toolbar-body" aria-label="Brush and colour">
+            <div class="hud-dock__menu-header hud-dock__menu-header--toolbar">
+              <span class="hud-dock__menu-title">Brush</span>
+              <button
+                type="button"
+                id="hud-toggle-toolbar"
+                class="hud-dock__toggle hud__btn"
+                aria-expanded="true"
+                aria-controls="hud-toolbar-collapse"
+              >
+                <span class="hud-dock__glyph-collapse" aria-hidden="true">−</span>
+                <span class="hud-dock__glyph-expand" aria-hidden="true">+</span>
+              </button>
+            </div>
+            <div id="hud-toolbar-collapse" class="hud-dock__collapse-target">
           <div class="hud-brush__row">
-            <div class="hud-brush__colour" role="group" aria-label="Colour">
+            <button
+              type="button"
+              id="paint-undo"
+              class="hud__btn hud__btn--compact"
+              disabled
+              title="Undo last stroke (⌘/Ctrl+Z)"
+              aria-label="Undo last stroke"
+            >
+              Undo
+            </button>
+            <div class="hud-brush__colour" id="brush-colour-group" role="group" aria-label="Colour">
               <span class="hud-brush__name">Colour</span>
               <div class="hud-brush__colour-row">
                 <button type="button" id="colour-transparent" class="hud__btn hud__btn--compact" title="Erase to transparent">
@@ -47,9 +72,26 @@
             </label>
           </div>
           <div id="colour-swatches" class="hud__swatches hud__swatches--toolbar" aria-label="Recent colours"></div>
-        </header>
+            </div>
+          </header>
+        </div>
 
-        <aside class="hud-left hud-panel" aria-label="Tools">
+        <div class="hud-dock hud-dock--left" id="hud-dock-left" data-hud-dock="left">
+        <aside class="hud-dock__body hud-left hud-panel" id="hud-left-body" aria-label="Tools">
+          <div class="hud-dock__menu-header">
+            <span class="hud-dock__menu-title">Tools</span>
+            <button
+              type="button"
+              id="hud-toggle-left"
+              class="hud-dock__toggle hud__btn"
+              aria-expanded="true"
+              aria-controls="hud-left-inner"
+            >
+              <span class="hud-dock__glyph-collapse" aria-hidden="true">−</span>
+              <span class="hud-dock__glyph-expand" aria-hidden="true">+</span>
+            </button>
+          </div>
+          <div id="hud-left-inner" class="hud-dock__collapse-target">
           <div class="hud__mode" role="group" aria-label="Interaction mode">
             <button type="button" id="mode-paint" class="hud__segment hud__segment--active" aria-pressed="true">
               Paint
@@ -60,10 +102,26 @@
             <button type="button" id="project-new" class="hud__btn">New project</button>
             <button type="button" id="project-export" class="hud__btn">Export</button>
           </div>
+          </div>
         </aside>
+        </div>
 
-        <aside class="hud-right hud-panel" aria-label="Slices and layers">
-          <span class="hud__label">Slices</span>
+        <div class="hud-dock hud-dock--right" id="hud-dock-right" data-hud-dock="right">
+        <aside class="hud-dock__body hud-right hud-panel" id="hud-right-body" aria-label="Slices and layers">
+          <div class="hud-dock__menu-header">
+            <span class="hud-dock__menu-title">Slices</span>
+            <button
+              type="button"
+              id="hud-toggle-right"
+              class="hud-dock__toggle hud__btn"
+              aria-expanded="true"
+              aria-controls="hud-right-inner"
+            >
+              <span class="hud-dock__glyph-collapse" aria-hidden="true">−</span>
+              <span class="hud-dock__glyph-expand" aria-hidden="true">+</span>
+            </button>
+          </div>
+          <div id="hud-right-inner" class="hud-dock__collapse-target">
           <div class="hud__row hud__row--slice-label">
             <span id="slice-active-label" aria-live="polite">Slice 1 / 1</span>
           </div>
@@ -155,7 +213,9 @@
             </select>
           </label>
           <button type="button" id="slice-orient-viewport" class="hud__btn hud__btn--block">Match viewport</button>
+          </div>
         </aside>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

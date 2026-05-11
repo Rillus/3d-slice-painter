@@ -17,11 +17,19 @@ import {
   serialiseManifest,
   slicePngFilename,
 } from "./project/exportBundle.js";
+import { loadHudDockExpanded, saveHudDockExpanded, type HudDockId } from "./ui/hudDockPrefs.js";
+import { pushPreStrokeSnapshot } from "./paint/undoStack.js";
+import {
+  parseSessionPaintingJson,
+  serialiseSessionPainting,
+  SESSION_PAINTING_KEY,
+} from "./paint/sessionPainting.js";
 
 const PAINT_RES = 512;
 const PLANE_W = 2.4;
 const PLANE_H = 2.4;
 const MAX_SLICES = 128;
+const MAX_UNDO_STROKES = 24;
 const LS_COLOUR = "3dsp.brushColour";
 const LS_SWATCHES = "3dsp.swatches";
 const MAX_SWATCHES = 12;
@@ -41,7 +49,9 @@ const modePaintBtn = document.querySelector<HTMLButtonElement>("#mode-paint");
 const modeNavigateBtn = document.querySelector<HTMLButtonElement>("#mode-navigate");
 const colourNative = document.querySelector<HTMLInputElement>("#colour-native");
 const colourHex = document.querySelector<HTMLInputElement>("#colour-hex");
+const brushColourGroup = document.querySelector<HTMLDivElement>("#brush-colour-group");
 const colourTransparentBtn = document.querySelector<HTMLButtonElement>("#colour-transparent");
+const paintUndoBtn = document.querySelector<HTMLButtonElement>("#paint-undo");
 const swatchesContainer = document.querySelector<HTMLDivElement>("#colour-swatches");
 const sliceActiveLabel = document.querySelector<HTMLSpanElement>("#slice-active-label");
 const slicePrevBtn = document.querySelector<HTMLButtonElement>("#slice-prev");
@@ -178,6 +188,46 @@ loadStoredColour();
 swatches = loadStoredSwatches();
 syncColourInputs();
 
+function hudDockToggleLabel(id: HudDockId, expanded: boolean): string {
+  switch (id) {
+    case "toolbar":
+      return expanded ? "Hide toolbar" : "Show toolbar";
+    case "left":
+      return expanded ? "Hide tools" : "Show tools";
+    case "right":
+      return expanded ? "Hide slices" : "Show slices";
+    default:
+      return expanded ? "Hide panel" : "Show panel";
+  }
+}
+
+function applyHudDockExpanded(dock: HTMLElement, id: HudDockId, expanded: boolean): void {
+  dock.classList.toggle("hud-dock--collapsed", !expanded);
+  const toggle = dock.querySelector<HTMLButtonElement>(".hud-dock__toggle");
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    toggle.setAttribute("aria-label", hudDockToggleLabel(id, expanded));
+  }
+}
+
+function initHudDocks(): void {
+  const docks: { id: HudDockId; el: HTMLElement | null }[] = [
+    { id: "toolbar", el: document.getElementById("hud-dock-toolbar") },
+    { id: "left", el: document.getElementById("hud-dock-left") },
+    { id: "right", el: document.getElementById("hud-dock-right") },
+  ];
+  for (const { id, el } of docks) {
+    if (!el) continue;
+    applyHudDockExpanded(el, id, loadHudDockExpanded(id));
+    const toggle = el.querySelector<HTMLButtonElement>(".hud-dock__toggle");
+    toggle?.addEventListener("click", () => {
+      const nextExpanded = el.classList.contains("hud-dock--collapsed");
+      saveHudDockExpanded(id, nextExpanded);
+      applyHudDockExpanded(el, id, nextExpanded);
+    });
+  }
+}
+
 type SliceState = {
   mesh: THREE.Mesh;
   texture: THREE.CanvasTexture;
@@ -192,6 +242,12 @@ type SliceState = {
   /** Local scale on the slice quad (multiplier). */
   planeScaleX: number;
   planeScaleY: number;
+  /** Pre-stroke pixel snapshots for undo (newest at end). */
+  undoStack: Uint8ClampedArray[];
+  /** World rotation: local +Z (paint normal) → world. */
+  stackQuaternion: THREE.Quaternion;
+  /** Last chosen value for the slice facing control (`viewport_action` after match viewport). */
+  sliceFacingSelectValue: string;
 };
 
 const scene = new THREE.Scene();
@@ -214,7 +270,6 @@ const planeGeo = new THREE.PlaneGeometry(PLANE_W, PLANE_H);
 const slices: SliceState[] = [];
 let activeSliceIndex = 0;
 let sliceSpacingWorld = 0.12;
-const sliceStackRotation = new THREE.Quaternion();
 
 function getPaint2d(canvasEl: HTMLCanvasElement): CanvasRenderingContext2D {
   const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
@@ -242,7 +297,8 @@ function createSliceState(): SliceState {
   const mat = new THREE.MeshBasicMaterial({
     map: texture,
     transparent: true,
-    depthWrite: true,
+    /* Let alpha < 1 show slices behind along the view; true would write plane depth for holes. */
+    depthWrite: false,
     side: THREE.DoubleSide,
   });
   const mesh = new THREE.Mesh(planeGeo, mat);
@@ -259,6 +315,9 @@ function createSliceState(): SliceState {
     planeOffsetY: 0,
     planeScaleX: 1,
     planeScaleY: 1,
+    undoStack: [],
+    stackQuaternion: quaternionForCardinalPreset("pz").clone(),
+    sliceFacingSelectValue: "pz",
   };
 }
 
@@ -275,19 +334,26 @@ function getActiveSlice(): SliceState | undefined {
 
 function updateSliceTransforms(): void {
   const gap = sliceSpacingWorld;
-  const worldNormal = new THREE.Vector3(0, 0, 1).applyQuaternion(sliceStackRotation);
   for (let i = 0; i < slices.length; i++) {
     const s = slices[i]!;
     const m = s.mesh;
-    m.quaternion.copy(sliceStackRotation);
+    const q = s.stackQuaternion;
+    m.quaternion.copy(q);
+    const worldNormal = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
     const scalar = stackPositionScalar(i, gap, s.alongStackOffset);
     const stackPos = worldNormal.clone().multiplyScalar(scalar);
-    const lateral = new THREE.Vector3(s.planeOffsetX, s.planeOffsetY, 0).applyQuaternion(sliceStackRotation);
+    const lateral = new THREE.Vector3(s.planeOffsetX, s.planeOffsetY, 0).applyQuaternion(q);
     m.position.copy(stackPos.add(lateral));
     const sx = Math.min(50, Math.max(0.05, s.planeScaleX));
     const sy = Math.min(50, Math.max(0.05, s.planeScaleY));
     m.scale.set(sx, sy, 1);
   }
+}
+
+function syncSliceOrientationUiFromActive(): void {
+  const s = getActiveSlice();
+  if (!sliceOrientSelect || !s) return;
+  sliceOrientSelect.value = s.sliceFacingSelectValue;
 }
 
 function syncSlicePlaneInputsFromActive(): void {
@@ -323,22 +389,29 @@ function nudgeActiveSliceAlongStack(direction: 1 | -1): void {
 }
 
 function applySliceOrientationFromSelect(): void {
+  const s = getActiveSlice();
   const v = sliceOrientSelect?.value;
-  if (!v) return;
+  if (!s || !v) return;
   if (v === "viewport_action") {
     matchSliceOrientationToViewport();
     return;
   }
   if (isCardinalPreset(v)) {
-    sliceStackRotation.copy(quaternionForCardinalPreset(v));
+    s.stackQuaternion.copy(quaternionForCardinalPreset(v));
+    s.sliceFacingSelectValue = v;
     updateSliceTransforms();
+    schedulePersistPaintingSession();
   }
 }
 
 function matchSliceOrientationToViewport(): void {
-  sliceStackRotation.copy(quaternionFaceReferenceTowardViewer(controls.target, camera.position));
+  const s = getActiveSlice();
+  if (!s) return;
+  s.stackQuaternion.copy(quaternionFaceReferenceTowardViewer(controls.target, camera.position));
+  s.sliceFacingSelectValue = "viewport_action";
   if (sliceOrientSelect) sliceOrientSelect.value = "viewport_action";
   updateSliceTransforms();
+  schedulePersistPaintingSession();
 }
 
 function readSliceSpacingFromInput(): number {
@@ -375,6 +448,27 @@ function updateSliceHud(): void {
     if (el) el.disabled = interactionMode === "navigate";
   }
   syncSlicePlaneInputsFromActive();
+  syncSliceOrientationUiFromActive();
+  syncUndoButton();
+}
+
+function pushStrokeUndoSnapshot(s: SliceState): void {
+  pushPreStrokeSnapshot(s.undoStack, s.imageData.data, MAX_UNDO_STROKES);
+}
+
+function undoLastStroke(): void {
+  const s = getActiveSlice();
+  if (!s || s.undoStack.length === 0) return;
+  const restore = s.undoStack.pop()!;
+  s.imageData.data.set(restore);
+  flushSliceTexture(s);
+  syncUndoButton();
+  schedulePersistPaintingSession();
+}
+
+function syncUndoButton(): void {
+  const s = getActiveSlice();
+  paintUndoBtn && (paintUndoBtn.disabled = !s || s.undoStack.length === 0);
 }
 
 function setActiveSliceIndex(next: number): void {
@@ -393,6 +487,7 @@ function addSlice(): void {
   updateSliceTransforms();
   attachFrameToActiveSlice();
   updateSliceHud();
+  schedulePersistPaintingSession();
 }
 
 function flushSliceTexture(s: SliceState): void {
@@ -436,6 +531,113 @@ function downloadBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
+function imageDataToPngDataUrlSync(data: ImageData): string {
+  const c = document.createElement("canvas");
+  c.width = data.width;
+  c.height = data.height;
+  const ctx = c.getContext("2d");
+  if (!ctx) return "";
+  ctx.putImageData(data, 0, 0);
+  return c.toDataURL("image/png");
+}
+
+function decodePngDataUrlToImageData(dataUrl: string, w: number, h: number): Promise<ImageData | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      if (img.naturalWidth !== w || img.naturalHeight !== h) {
+        resolve(null);
+        return;
+      }
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext("2d");
+      if (!ctx) {
+        resolve(null);
+        return;
+      }
+      ctx.drawImage(img, 0, 0);
+      resolve(ctx.getImageData(0, 0, w, h));
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+function clearSessionPaintingStorage(): void {
+  try {
+    localStorage.removeItem(SESSION_PAINTING_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+let sessionPaintSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function persistPaintingSessionSync(): void {
+  if (slices.length === 0) return;
+  const layers: string[] = [];
+  for (const s of slices) {
+    const url = imageDataToPngDataUrlSync(s.imageData);
+    if (!url) return;
+    layers.push(url);
+  }
+  try {
+    localStorage.setItem(
+      SESSION_PAINTING_KEY,
+      serialiseSessionPainting({ v: 1, w: PAINT_RES, h: PAINT_RES, layers }),
+    );
+  } catch {
+    /* quota exceeded or storage disabled */
+  }
+}
+
+function schedulePersistPaintingSession(): void {
+  if (sessionPaintSaveTimer !== null) clearTimeout(sessionPaintSaveTimer);
+  sessionPaintSaveTimer = setTimeout(() => {
+    sessionPaintSaveTimer = null;
+    persistPaintingSessionSync();
+  }, 400);
+}
+
+async function restorePaintingFromStorageIfPresent(): Promise<void> {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(SESSION_PAINTING_KEY);
+  } catch {
+    return;
+  }
+  if (!raw) return;
+  const parsed = parseSessionPaintingJson(raw);
+  if (!parsed || parsed.w !== PAINT_RES || parsed.h !== PAINT_RES) return;
+  const L = parsed.layers.length;
+  if (L < 1 || L > MAX_SLICES) return;
+
+  const decoded = await Promise.all(
+    parsed.layers.map((url) => decodePngDataUrlToImageData(url, PAINT_RES, PAINT_RES)),
+  );
+  if (decoded.some((d) => !d)) return;
+
+  if (sliceFrame.parent) sliceFrame.parent.remove(sliceFrame);
+  for (const s of slices) disposeSlice(s);
+  slices.length = 0;
+  for (let i = 0; i < L; i++) slices.push(createSliceState());
+  for (let i = 0; i < L; i++) {
+    const s = slices[i]!;
+    const id = decoded[i]!;
+    if (!id) continue;
+    s.imageData.data.set(id.data);
+    s.undoStack.length = 0;
+    flushSliceTexture(s);
+  }
+  activeSliceIndex = Math.min(activeSliceIndex, L - 1);
+  attachFrameToActiveSlice();
+  updateSliceTransforms();
+  updateSliceHud();
+  syncUndoButton();
+}
+
 function newProject(): void {
   if (!confirm("Start a new project? All slices and strokes will be cleared.")) return;
 
@@ -457,11 +659,10 @@ function newProject(): void {
   activeSliceIndex = 0;
   sliceSpacingWorld = 0.12;
   if (sliceSpacingInput) sliceSpacingInput.value = "0.12";
-  sliceStackRotation.identity();
-  if (sliceOrientSelect) sliceOrientSelect.value = "pz";
   updateSliceTransforms();
   attachFrameToActiveSlice();
   updateSliceHud();
+  clearSessionPaintingStorage();
 }
 
 let exportInProgress = false;
@@ -480,8 +681,9 @@ async function exportProject(): Promise<void> {
       const buf = new Uint8Array(await blob.arrayBuffer());
       entries[slicePngFilename(i)] = buf;
     }
-    const orientVal = sliceOrientSelect?.value;
-    const orientationCardinal = orientVal && isCardinalPreset(orientVal) ? orientVal : null;
+    const s0 = slices[0];
+    const orientationCardinal =
+      s0 && isCardinalPreset(s0.sliceFacingSelectValue) ? s0.sliceFacingSelectValue : null;
     const manifest = buildProjectManifest(
       {
         sliceCount: slices.length,
@@ -489,13 +691,24 @@ async function exportProject(): Promise<void> {
         canvasSize: PAINT_RES,
         planeWidthWorld: PLANE_W,
         planeHeightWorld: PLANE_H,
-        stackQuaternion: {
-          x: sliceStackRotation.x,
-          y: sliceStackRotation.y,
-          z: sliceStackRotation.z,
-          w: sliceStackRotation.w,
-        },
+        stackQuaternion: s0
+          ? {
+              x: s0.stackQuaternion.x,
+              y: s0.stackQuaternion.y,
+              z: s0.stackQuaternion.z,
+              w: s0.stackQuaternion.w,
+            }
+          : undefined,
+        sliceStackQuaternions: slices.map((s) => ({
+          x: s.stackQuaternion.x,
+          y: s.stackQuaternion.y,
+          z: s.stackQuaternion.z,
+          w: s.stackQuaternion.w,
+        })),
         orientationCardinal,
+        sliceOrientationCardinals: slices.map((s) =>
+          isCardinalPreset(s.sliceFacingSelectValue) ? s.sliceFacingSelectValue : null,
+        ),
         sliceAlongStackOffsets: slices.map((s) => s.alongStackOffset),
         slicePlaneOffsetX: slices.map((s) => s.planeOffsetX),
         slicePlaneOffsetY: slices.map((s) => s.planeOffsetY),
@@ -704,9 +917,16 @@ for (const el of [slicePlanePxInput, slicePlanePyInput, slicePlaneSxInput, slice
 }
 
 window.addEventListener("keydown", (e) => {
-  if (interactionMode !== "paint") return;
   const t = e.target;
-  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return;
+  const typing =
+    t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
+  if (!typing && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
+    e.preventDefault();
+    undoLastStroke();
+    return;
+  }
+  if (interactionMode !== "paint") return;
+  if (typing) return;
   if (e.key === "[") {
     e.preventDefault();
     setActiveSliceIndex(activeSliceIndex - 1);
@@ -742,6 +962,24 @@ colourNative?.addEventListener("change", () => {
   if (!p) return;
   applyRgb({ r: p.r, g: p.g, b: p.b, a: 255 }, true);
   recordSwatch(colourNative.value);
+  brushColourGroup?.classList.remove("hud-brush__colour--palette-open");
+});
+
+colourNative?.closest("label")?.addEventListener("pointerdown", () => {
+  brushColourGroup?.classList.add("hud-brush__colour--palette-open");
+});
+
+brushColourGroup?.addEventListener("focusin", (ev) => {
+  if (!(ev.target instanceof HTMLElement)) return;
+  if (ev.target.id === "colour-transparent") return;
+  brushColourGroup?.classList.add("hud-brush__colour--palette-open");
+});
+
+brushColourGroup?.addEventListener("focusout", (ev) => {
+  if (!(ev.currentTarget instanceof HTMLElement)) return;
+  const next = ev.relatedTarget;
+  if (next instanceof Node && ev.currentTarget.contains(next)) return;
+  ev.currentTarget.classList.remove("hud-brush__colour--palette-open");
 });
 
 colourTransparentBtn?.addEventListener("click", () => {
@@ -774,6 +1012,8 @@ colourHex?.addEventListener("keydown", (ev) => {
 modePaintBtn?.addEventListener("click", () => setInteractionMode("paint"));
 modeNavigateBtn?.addEventListener("click", () => setInteractionMode("navigate"));
 
+paintUndoBtn?.addEventListener("click", () => undoLastStroke());
+
 slices.push(createSliceState());
 sliceSpacingWorld = readSliceSpacingFromInput();
 updateSliceTransforms();
@@ -786,6 +1026,11 @@ renderSwatches();
 canvas.addEventListener("pointerdown", (e) => {
   if (interactionMode !== "paint") return;
   if (e.button !== 0) return;
+  const active = getActiveSlice();
+  if (!active) return;
+  if (!rayToCanvas(e.clientX, e.clientY)) return;
+  pushStrokeUndoSnapshot(active);
+  syncUndoButton();
   activePaintPointerId = e.pointerId;
   canvas.setPointerCapture(e.pointerId);
   painting = true;
@@ -808,14 +1053,17 @@ function endPaint(e: PointerEvent): void {
   } catch {
     /* already released */
   }
+  schedulePersistPaintingSession();
 }
 
 canvas.addEventListener("pointerup", endPaint);
 canvas.addEventListener("pointercancel", endPaint);
 canvas.addEventListener("lostpointercapture", () => {
+  const wasPainting = painting;
   painting = false;
   lastPaintCanvas = null;
   activePaintPointerId = null;
+  if (wasPainting) schedulePersistPaintingSession();
 });
 
 function tick(): void {
@@ -825,5 +1073,16 @@ function tick(): void {
   }
   renderer.render(scene, camera);
 }
+
+window.addEventListener("beforeunload", () => {
+  persistPaintingSessionSync();
+});
+
+void (async () => {
+  await restorePaintingFromStorageIfPresent();
+  setInteractionMode("paint");
+  renderSwatches();
+  initHudDocks();
+})();
 
 requestAnimationFrame(tick);

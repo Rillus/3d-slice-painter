@@ -44,6 +44,23 @@ describe("buildProjectManifest", () => {
     expect(m.slicePlaneOffsetX).toEqual([0.1, -0.2]);
     expect(m.slicePlaneScaleY).toEqual([1, 0.8]);
   });
+
+  it("accepts per-slice stack quaternions when provided", () => {
+    const m = buildProjectManifest(
+      {
+        sliceCount: 1,
+        spacingWorld: 0.12,
+        canvasSize: 512,
+        planeWidthWorld: 2.4,
+        planeHeightWorld: 2.4,
+        sliceStackQuaternions: [{ x: 0, y: 0, z: 0, w: 1 }],
+        sliceOrientationCardinals: ["pz"],
+      },
+      "2026-05-11T12:00:00.000Z",
+    );
+    expect(m.sliceStackQuaternions?.[0]?.w).toBe(1);
+    expect(m.sliceOrientationCardinals?.[0]).toBe("pz");
+  });
 });
 
 describe("serialiseManifest", () => {
