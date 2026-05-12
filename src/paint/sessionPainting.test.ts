@@ -17,6 +17,36 @@ describe("sessionPainting", () => {
     expect(round).toEqual(payload);
   });
 
+  it("parses payload with sliceMeta matching layers", () => {
+    const payload = {
+      v: 1 as const,
+      w: 512,
+      h: 512,
+      layers: ["data:image/png;base64,aa", "data:image/png;base64,bb"],
+      spacingWorld: 0.15,
+      activeSliceIndex: 1,
+      sliceMeta: [
+        { along: 0, px: 0, py: 0, sx: 1, sy: 1, qx: 0, qy: 0, qz: 0, qw: 1, facing: "pz" },
+        { along: 0.1, px: 0.2, py: -0.1, sx: 1.2, sy: 0.9, qx: 0, qy: 0, qz: 0, qw: 1, facing: "px" },
+      ],
+    };
+    expect(parseSessionPaintingJson(JSON.stringify(payload))).toEqual(payload);
+  });
+
+  it("rejects sliceMeta length mismatch", () => {
+    expect(
+      parseSessionPaintingJson(
+        JSON.stringify({
+          v: 1,
+          w: 512,
+          h: 512,
+          layers: ["a", "b"],
+          sliceMeta: [{ along: 0, px: 0, py: 0, sx: 1, sy: 1, qx: 0, qy: 0, qz: 0, qw: 1, facing: "pz" }],
+        }),
+      ),
+    ).toBe(null);
+  });
+
   it("rejects invalid JSON and wrong shapes", () => {
     expect(parseSessionPaintingJson("")).toBe(null);
     expect(parseSessionPaintingJson("{}")).toBe(null);

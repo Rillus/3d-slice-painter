@@ -23,6 +23,7 @@ import {
   parseSessionPaintingJson,
   serialiseSessionPainting,
   SESSION_PAINTING_KEY,
+  type SessionSliceMetaV1,
 } from "./paint/sessionPainting.js";
 
 const PAINT_RES = 512;
@@ -33,6 +34,11 @@ const MAX_UNDO_STROKES = 24;
 const LS_COLOUR = "3dsp.brushColour";
 const LS_SWATCHES = "3dsp.swatches";
 const MAX_SWATCHES = 12;
+
+const SLICE_PLANE_POS_MIN = -3;
+const SLICE_PLANE_POS_MAX = 3;
+const SLICE_PLANE_SCALE_MIN = 0.05;
+const SLICE_PLANE_SCALE_SLIDER_MAX = 50;
 
 function getViewportCanvas(): HTMLCanvasElement {
   const el = document.querySelector("#c");
@@ -66,6 +72,10 @@ const slicePlanePxInput = document.querySelector<HTMLInputElement>("#slice-plane
 const slicePlanePyInput = document.querySelector<HTMLInputElement>("#slice-plane-py");
 const slicePlaneSxInput = document.querySelector<HTMLInputElement>("#slice-plane-sx");
 const slicePlaneSyInput = document.querySelector<HTMLInputElement>("#slice-plane-sy");
+const slicePlanePxOut = document.querySelector<HTMLOutputElement>("#slice-plane-px-out");
+const slicePlanePyOut = document.querySelector<HTMLOutputElement>("#slice-plane-py-out");
+const slicePlaneSxOut = document.querySelector<HTMLOutputElement>("#slice-plane-sx-out");
+const slicePlaneSyOut = document.querySelector<HTMLOutputElement>("#slice-plane-sy-out");
 const projectNewBtn = document.querySelector<HTMLButtonElement>("#project-new");
 const projectExportBtn = document.querySelector<HTMLButtonElement>("#project-export");
 
@@ -356,13 +366,35 @@ function syncSliceOrientationUiFromActive(): void {
   sliceOrientSelect.value = s.sliceFacingSelectValue;
 }
 
+function clampSlicePlanePos(n: number): number {
+  return Math.min(SLICE_PLANE_POS_MAX, Math.max(SLICE_PLANE_POS_MIN, n));
+}
+
+function clampSlicePlaneScale(n: number): number {
+  return Math.min(SLICE_PLANE_SCALE_SLIDER_MAX, Math.max(SLICE_PLANE_SCALE_MIN, n));
+}
+
+function formatPlaneReadout(el: HTMLOutputElement | null, n: number): void {
+  if (!el) return;
+  const abs = Math.abs(n);
+  el.textContent = abs >= 10 ? n.toFixed(1) : abs >= 1 ? n.toFixed(2) : n.toFixed(2);
+}
+
 function syncSlicePlaneInputsFromActive(): void {
   const s = getActiveSlice();
   if (!s) return;
-  if (slicePlanePxInput) slicePlanePxInput.value = String(s.planeOffsetX);
-  if (slicePlanePyInput) slicePlanePyInput.value = String(s.planeOffsetY);
-  if (slicePlaneSxInput) slicePlaneSxInput.value = String(s.planeScaleX);
-  if (slicePlaneSyInput) slicePlaneSyInput.value = String(s.planeScaleY);
+  const px = clampSlicePlanePos(s.planeOffsetX);
+  const py = clampSlicePlanePos(s.planeOffsetY);
+  const sx = clampSlicePlaneScale(s.planeScaleX);
+  const sy = clampSlicePlaneScale(s.planeScaleY);
+  if (slicePlanePxInput) slicePlanePxInput.value = String(px);
+  if (slicePlanePyInput) slicePlanePyInput.value = String(py);
+  if (slicePlaneSxInput) slicePlaneSxInput.value = String(sx);
+  if (slicePlaneSyInput) slicePlaneSyInput.value = String(sy);
+  formatPlaneReadout(slicePlanePxOut, px);
+  formatPlaneReadout(slicePlanePyOut, py);
+  formatPlaneReadout(slicePlaneSxOut, sx);
+  formatPlaneReadout(slicePlaneSyOut, sy);
 }
 
 function applyActiveSlicePlaneFromInputs(): void {
@@ -372,12 +404,13 @@ function applyActiveSlicePlaneFromInputs(): void {
   const py = Number(slicePlanePyInput?.value ?? 0);
   const sx = Number(slicePlaneSxInput?.value ?? 1);
   const sy = Number(slicePlaneSyInput?.value ?? 1);
-  s.planeOffsetX = Number.isFinite(px) ? px : 0;
-  s.planeOffsetY = Number.isFinite(py) ? py : 0;
-  s.planeScaleX = Number.isFinite(sx) ? Math.min(50, Math.max(0.05, sx)) : 1;
-  s.planeScaleY = Number.isFinite(sy) ? Math.min(50, Math.max(0.05, sy)) : 1;
+  s.planeOffsetX = Number.isFinite(px) ? clampSlicePlanePos(px) : 0;
+  s.planeOffsetY = Number.isFinite(py) ? clampSlicePlanePos(py) : 0;
+  s.planeScaleX = Number.isFinite(sx) ? clampSlicePlaneScale(sx) : 1;
+  s.planeScaleY = Number.isFinite(sy) ? clampSlicePlaneScale(sy) : 1;
   syncSlicePlaneInputsFromActive();
   updateSliceTransforms();
+  schedulePersistPaintingSession();
 }
 
 function nudgeActiveSliceAlongStack(direction: 1 | -1): void {
@@ -386,6 +419,7 @@ function nudgeActiveSliceAlongStack(direction: 1 | -1): void {
   const step = stackNudgeStepWorld(sliceSpacingWorld);
   s.alongStackOffset += direction * step;
   updateSliceTransforms();
+  schedulePersistPaintingSession();
 }
 
 function applySliceOrientationFromSelect(): void {
@@ -423,6 +457,7 @@ function readSliceSpacingFromInput(): number {
 function refreshSliceSpacingFromInput(): void {
   sliceSpacingWorld = readSliceSpacingFromInput();
   updateSliceTransforms();
+  schedulePersistPaintingSession();
 }
 
 function attachFrameToActiveSlice(): void {
@@ -583,10 +618,30 @@ function persistPaintingSessionSync(): void {
     if (!url) return;
     layers.push(url);
   }
+  const sliceMeta: SessionSliceMetaV1[] = slices.map((s) => ({
+    along: s.alongStackOffset,
+    px: s.planeOffsetX,
+    py: s.planeOffsetY,
+    sx: s.planeScaleX,
+    sy: s.planeScaleY,
+    qx: s.stackQuaternion.x,
+    qy: s.stackQuaternion.y,
+    qz: s.stackQuaternion.z,
+    qw: s.stackQuaternion.w,
+    facing: s.sliceFacingSelectValue,
+  }));
   try {
     localStorage.setItem(
       SESSION_PAINTING_KEY,
-      serialiseSessionPainting({ v: 1, w: PAINT_RES, h: PAINT_RES, layers }),
+      serialiseSessionPainting({
+        v: 1,
+        w: PAINT_RES,
+        h: PAINT_RES,
+        layers,
+        spacingWorld: sliceSpacingWorld,
+        activeSliceIndex,
+        sliceMeta,
+      }),
     );
   } catch {
     /* quota exceeded or storage disabled */
@@ -631,7 +686,31 @@ async function restorePaintingFromStorageIfPresent(): Promise<void> {
     s.undoStack.length = 0;
     flushSliceTexture(s);
   }
-  activeSliceIndex = Math.min(activeSliceIndex, L - 1);
+
+  if (parsed.sliceMeta && parsed.sliceMeta.length === L) {
+    for (let i = 0; i < L; i++) {
+      const s = slices[i]!;
+      const m = parsed.sliceMeta[i]!;
+      s.alongStackOffset = m.along;
+      s.planeOffsetX = m.px;
+      s.planeOffsetY = m.py;
+      s.planeScaleX = m.sx;
+      s.planeScaleY = m.sy;
+      s.stackQuaternion.set(m.qx, m.qy, m.qz, m.qw);
+      s.stackQuaternion.normalize();
+      s.sliceFacingSelectValue = m.facing;
+    }
+  }
+  if (parsed.spacingWorld !== undefined && Number.isFinite(parsed.spacingWorld)) {
+    sliceSpacingWorld = Math.max(0.001, parsed.spacingWorld);
+    if (sliceSpacingInput) sliceSpacingInput.value = String(sliceSpacingWorld);
+  }
+  if (parsed.activeSliceIndex !== undefined && Number.isFinite(parsed.activeSliceIndex)) {
+    const ai = Math.floor(parsed.activeSliceIndex);
+    activeSliceIndex = Math.max(0, Math.min(L - 1, ai));
+  } else {
+    activeSliceIndex = Math.max(0, Math.min(L - 1, activeSliceIndex));
+  }
   attachFrameToActiveSlice();
   updateSliceTransforms();
   updateSliceHud();

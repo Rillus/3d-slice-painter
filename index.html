@@ -157,31 +157,61 @@
 
           <span class="hud__label hud__label--sub">Active slice (plane)</span>
           <div class="hud__grid2">
-            <label class="hud__mini">
-              Pos X
-              <input id="slice-plane-px" type="number" step="0.05" value="0" aria-label="Slice position local X" />
+            <label class="hud__mini hud__mini--slider">
+              <span class="hud__mini-head">
+                <span>Pos X</span>
+                <output id="slice-plane-px-out" class="hud__mini-value" for="slice-plane-px">0</output>
+              </span>
+              <input
+                id="slice-plane-px"
+                type="range"
+                min="-3"
+                max="3"
+                step="0.02"
+                value="0"
+                aria-label="Slice position local X"
+              />
             </label>
-            <label class="hud__mini">
-              Pos Y
-              <input id="slice-plane-py" type="number" step="0.05" value="0" aria-label="Slice position local Y" />
+            <label class="hud__mini hud__mini--slider">
+              <span class="hud__mini-head">
+                <span>Pos Y</span>
+                <output id="slice-plane-py-out" class="hud__mini-value" for="slice-plane-py">0</output>
+              </span>
+              <input
+                id="slice-plane-py"
+                type="range"
+                min="-3"
+                max="3"
+                step="0.02"
+                value="0"
+                aria-label="Slice position local Y"
+              />
             </label>
-            <label class="hud__mini">
-              Scale X
+            <label class="hud__mini hud__mini--slider">
+              <span class="hud__mini-head">
+                <span>Scale X</span>
+                <output id="slice-plane-sx-out" class="hud__mini-value" for="slice-plane-sx">1</output>
+              </span>
               <input
                 id="slice-plane-sx"
-                type="number"
+                type="range"
                 min="0.05"
+                max="50"
                 step="0.05"
                 value="1"
                 aria-label="Slice scale local X"
               />
             </label>
-            <label class="hud__mini">
-              Scale Y
+            <label class="hud__mini hud__mini--slider">
+              <span class="hud__mini-head">
+                <span>Scale Y</span>
+                <output id="slice-plane-sy-out" class="hud__mini-value" for="slice-plane-sy">1</output>
+              </span>
               <input
                 id="slice-plane-sy"
-                type="number"
+                type="range"
                 min="0.05"
+                max="50"
                 step="0.05"
                 value="1"
                 aria-label="Slice scale local Y"
