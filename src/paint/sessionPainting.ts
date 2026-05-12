@@ -12,6 +12,9 @@ export type SessionSliceMetaV1 = {
   qz: number;
   qw: number;
   facing: string;
+  /** 0..3 index into scale slider tier maxes; optional for older saves. */
+  tsx?: number;
+  tsy?: number;
 };
 
 export type SessionPaintingV1 = {
@@ -45,7 +48,9 @@ function isSliceMetaRow(o: unknown): o is SessionSliceMetaV1 {
     isFiniteNum(r.qy) &&
     isFiniteNum(r.qz) &&
     isFiniteNum(r.qw) &&
-    typeof r.facing === "string"
+    typeof r.facing === "string" &&
+    (r.tsx === undefined || (typeof r.tsx === "number" && Number.isFinite(r.tsx))) &&
+    (r.tsy === undefined || (typeof r.tsy === "number" && Number.isFinite(r.tsy)))
   );
 }
 

@@ -11,6 +11,19 @@ import {
   quaternionForCardinalPreset,
 } from "./slices/orientation.js";
 import { stackNudgeStepWorld, stackPositionScalar } from "./slices/stackPosition.js";
+import {
+  bumpTierUpUntilMeshFits,
+  clampMeshScale,
+  clampMeshScaleToTierCap,
+  clampTierIndex,
+  inferTierFromMeshScale,
+  meshScaleFromSliderValue,
+  ratchetTierDown,
+  ratchetTierUp,
+  sliderStepForTierMax,
+  tierMaxForIndex,
+  type ScaleTierIndex,
+} from "./slices/sliceScaleTier.js";
 import { zipSync } from "fflate";
 import {
   buildProjectManifest,
@@ -37,8 +50,6 @@ const MAX_SWATCHES = 12;
 
 const SLICE_PLANE_POS_MIN = -3;
 const SLICE_PLANE_POS_MAX = 3;
-const SLICE_PLANE_SCALE_MIN = 0.05;
-const SLICE_PLANE_SCALE_SLIDER_MAX = 50;
 
 function getViewportCanvas(): HTMLCanvasElement {
   const el = document.querySelector("#c");
@@ -258,6 +269,9 @@ type SliceState = {
   stackQuaternion: THREE.Quaternion;
   /** Last chosen value for the slice facing control (`viewport_action` after match viewport). */
   sliceFacingSelectValue: string;
+  /** Scale slider tier (0 = max 2 … 3 = max 50); ratchet on release at slider ends. */
+  scaleSliderTierX: ScaleTierIndex;
+  scaleSliderTierY: ScaleTierIndex;
 };
 
 const scene = new THREE.Scene();
@@ -328,6 +342,8 @@ function createSliceState(): SliceState {
     undoStack: [],
     stackQuaternion: quaternionForCardinalPreset("pz").clone(),
     sliceFacingSelectValue: "pz",
+    scaleSliderTierX: 0,
+    scaleSliderTierY: 0,
   };
 }
 
@@ -354,8 +370,8 @@ function updateSliceTransforms(): void {
     const stackPos = worldNormal.clone().multiplyScalar(scalar);
     const lateral = new THREE.Vector3(s.planeOffsetX, s.planeOffsetY, 0).applyQuaternion(q);
     m.position.copy(stackPos.add(lateral));
-    const sx = Math.min(50, Math.max(0.05, s.planeScaleX));
-    const sy = Math.min(50, Math.max(0.05, s.planeScaleY));
+    const sx = clampMeshScale(s.planeScaleX);
+    const sy = clampMeshScale(s.planeScaleY);
     m.scale.set(sx, sy, 1);
   }
 }
@@ -370,10 +386,6 @@ function clampSlicePlanePos(n: number): number {
   return Math.min(SLICE_PLANE_POS_MAX, Math.max(SLICE_PLANE_POS_MIN, n));
 }
 
-function clampSlicePlaneScale(n: number): number {
-  return Math.min(SLICE_PLANE_SCALE_SLIDER_MAX, Math.max(SLICE_PLANE_SCALE_MIN, n));
-}
-
 function formatPlaneReadout(el: HTMLOutputElement | null, n: number): void {
   if (!el) return;
   const abs = Math.abs(n);
@@ -385,16 +397,32 @@ function syncSlicePlaneInputsFromActive(): void {
   if (!s) return;
   const px = clampSlicePlanePos(s.planeOffsetX);
   const py = clampSlicePlanePos(s.planeOffsetY);
-  const sx = clampSlicePlaneScale(s.planeScaleX);
-  const sy = clampSlicePlaneScale(s.planeScaleY);
+  s.scaleSliderTierX = bumpTierUpUntilMeshFits(clampTierIndex(s.scaleSliderTierX), s.planeScaleX);
+  s.scaleSliderTierY = bumpTierUpUntilMeshFits(clampTierIndex(s.scaleSliderTierY), s.planeScaleY);
+  const tx = clampTierIndex(s.scaleSliderTierX);
+  const ty = clampTierIndex(s.scaleSliderTierY);
+  const maxX = tierMaxForIndex(tx);
+  const maxY = tierMaxForIndex(ty);
+  const sxMesh = clampMeshScale(s.planeScaleX);
+  const syMesh = clampMeshScale(s.planeScaleY);
   if (slicePlanePxInput) slicePlanePxInput.value = String(px);
   if (slicePlanePyInput) slicePlanePyInput.value = String(py);
-  if (slicePlaneSxInput) slicePlaneSxInput.value = String(sx);
-  if (slicePlaneSyInput) slicePlaneSyInput.value = String(sy);
+  if (slicePlaneSxInput) {
+    slicePlaneSxInput.min = "0";
+    slicePlaneSxInput.max = String(maxX);
+    slicePlaneSxInput.step = sliderStepForTierMax(maxX);
+    slicePlaneSxInput.value = String(Math.min(sxMesh, maxX));
+  }
+  if (slicePlaneSyInput) {
+    slicePlaneSyInput.min = "0";
+    slicePlaneSyInput.max = String(maxY);
+    slicePlaneSyInput.step = sliderStepForTierMax(maxY);
+    slicePlaneSyInput.value = String(Math.min(syMesh, maxY));
+  }
   formatPlaneReadout(slicePlanePxOut, px);
   formatPlaneReadout(slicePlanePyOut, py);
-  formatPlaneReadout(slicePlaneSxOut, sx);
-  formatPlaneReadout(slicePlaneSyOut, sy);
+  formatPlaneReadout(slicePlaneSxOut, sxMesh);
+  formatPlaneReadout(slicePlaneSyOut, syMesh);
 }
 
 function applyActiveSlicePlaneFromInputs(): void {
@@ -402,15 +430,51 @@ function applyActiveSlicePlaneFromInputs(): void {
   if (!s) return;
   const px = Number(slicePlanePxInput?.value ?? 0);
   const py = Number(slicePlanePyInput?.value ?? 0);
-  const sx = Number(slicePlaneSxInput?.value ?? 1);
-  const sy = Number(slicePlaneSyInput?.value ?? 1);
+  const rawSx = Number(slicePlaneSxInput?.value ?? 1);
+  const rawSy = Number(slicePlaneSyInput?.value ?? 1);
+  const maxX = tierMaxForIndex(clampTierIndex(s.scaleSliderTierX));
+  const maxY = tierMaxForIndex(clampTierIndex(s.scaleSliderTierY));
   s.planeOffsetX = Number.isFinite(px) ? clampSlicePlanePos(px) : 0;
   s.planeOffsetY = Number.isFinite(py) ? clampSlicePlanePos(py) : 0;
-  s.planeScaleX = Number.isFinite(sx) ? clampSlicePlaneScale(sx) : 1;
-  s.planeScaleY = Number.isFinite(sy) ? clampSlicePlaneScale(sy) : 1;
+  s.planeScaleX = Number.isFinite(rawSx) ? meshScaleFromSliderValue(rawSx, maxX) : 1;
+  s.planeScaleY = Number.isFinite(rawSy) ? meshScaleFromSliderValue(rawSy, maxY) : 1;
   syncSlicePlaneInputsFromActive();
   updateSliceTransforms();
   schedulePersistPaintingSession();
+}
+
+function commitSliceScaleSlider(axis: "x" | "y"): void {
+  const s = getActiveSlice();
+  const el = axis === "x" ? slicePlaneSxInput : slicePlaneSyInput;
+  if (!s || !el) return;
+  const max = Number(el.max);
+  const min = Number(el.min);
+  const val = Number(el.value);
+  const step = Math.max(1e-6, Number(el.step) || 0.02);
+  const atMax = val >= max - step * 0.55;
+  const atMin = val <= min + step * 0.55;
+  let changed = false;
+  if (atMax && (axis === "x" ? s.scaleSliderTierX : s.scaleSliderTierY) < 3) {
+    if (axis === "x") s.scaleSliderTierX = ratchetTierUp(clampTierIndex(s.scaleSliderTierX));
+    else s.scaleSliderTierY = ratchetTierUp(clampTierIndex(s.scaleSliderTierY));
+    changed = true;
+  } else if (atMin && (axis === "x" ? s.scaleSliderTierX : s.scaleSliderTierY) > 0) {
+    if (axis === "x") {
+      const nt = ratchetTierDown(clampTierIndex(s.scaleSliderTierX));
+      s.scaleSliderTierX = nt;
+      s.planeScaleX = clampMeshScaleToTierCap(s.planeScaleX, nt);
+    } else {
+      const nt = ratchetTierDown(clampTierIndex(s.scaleSliderTierY));
+      s.scaleSliderTierY = nt;
+      s.planeScaleY = clampMeshScaleToTierCap(s.planeScaleY, nt);
+    }
+    changed = true;
+  }
+  if (changed) {
+    syncSlicePlaneInputsFromActive();
+    updateSliceTransforms();
+    schedulePersistPaintingSession();
+  }
 }
 
 function nudgeActiveSliceAlongStack(direction: 1 | -1): void {
@@ -629,6 +693,8 @@ function persistPaintingSessionSync(): void {
     qz: s.stackQuaternion.z,
     qw: s.stackQuaternion.w,
     facing: s.sliceFacingSelectValue,
+    tsx: s.scaleSliderTierX,
+    tsy: s.scaleSliderTierY,
   }));
   try {
     localStorage.setItem(
@@ -699,6 +765,10 @@ async function restorePaintingFromStorageIfPresent(): Promise<void> {
       s.stackQuaternion.set(m.qx, m.qy, m.qz, m.qw);
       s.stackQuaternion.normalize();
       s.sliceFacingSelectValue = m.facing;
+      const tx = m.tsx !== undefined ? clampTierIndex(m.tsx) : inferTierFromMeshScale(s.planeScaleX);
+      const ty = m.tsy !== undefined ? clampTierIndex(m.tsy) : inferTierFromMeshScale(s.planeScaleY);
+      s.scaleSliderTierX = bumpTierUpUntilMeshFits(tx, s.planeScaleX);
+      s.scaleSliderTierY = bumpTierUpUntilMeshFits(ty, s.planeScaleY);
     }
   }
   if (parsed.spacingWorld !== undefined && Number.isFinite(parsed.spacingWorld)) {
@@ -990,10 +1060,20 @@ sliceNudgeBackBtn?.addEventListener("click", () => nudgeActiveSliceAlongStack(-1
 sliceNudgeForwardBtn?.addEventListener("click", () => nudgeActiveSliceAlongStack(1));
 sliceAddBtn?.addEventListener("click", () => addSlice());
 
-for (const el of [slicePlanePxInput, slicePlanePyInput, slicePlaneSxInput, slicePlaneSyInput]) {
+for (const el of [slicePlanePxInput, slicePlanePyInput]) {
   el?.addEventListener("input", () => applyActiveSlicePlaneFromInputs());
   el?.addEventListener("change", () => applyActiveSlicePlaneFromInputs());
 }
+slicePlaneSxInput?.addEventListener("input", () => applyActiveSlicePlaneFromInputs());
+slicePlaneSyInput?.addEventListener("input", () => applyActiveSlicePlaneFromInputs());
+slicePlaneSxInput?.addEventListener("change", () => {
+  applyActiveSlicePlaneFromInputs();
+  commitSliceScaleSlider("x");
+});
+slicePlaneSyInput?.addEventListener("change", () => {
+  applyActiveSlicePlaneFromInputs();
+  commitSliceScaleSlider("y");
+});
 
 window.addEventListener("keydown", (e) => {
   const t = e.target;
