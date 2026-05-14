@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compositeDab, compositeEraseDab, smoothstep, stampAlpha } from "./stamp.js";
+import { compositeDab, compositeEraseDab, smoothstep, stampAlpha, stampAlphaAt } from "./stamp.js";
 
 describe("smoothstep", () => {
   it("returns 0 at or below the lower edge", () => {
@@ -47,6 +47,35 @@ describe("stampAlpha", () => {
   });
 });
 
+describe("stampAlphaAt", () => {
+  it("supports square brush shape", () => {
+    expect(stampAlphaAt(3.9, 7.5, 8, 1, { shape: "round", slantDeg: 0, texture: "smooth" })).toBe(0);
+    expect(stampAlphaAt(3.9, 7.5, 8, 1, { shape: "square", slantDeg: 0, texture: "smooth" })).toBe(1);
+  });
+
+  it("applies slant before evaluating the stamp shape", () => {
+    const upright = stampAlphaAt(6, 6, 8, 1, { shape: "round", slantDeg: 0, texture: "smooth" });
+    const slanted = stampAlphaAt(6, 6, 8, 1, { shape: "round", slantDeg: 45, texture: "smooth" });
+    expect(upright).toBe(0);
+    expect(slanted).toBeGreaterThan(0);
+  });
+
+  it("applies deterministic texture to stamp opacity", () => {
+    const grainSamples = [
+      stampAlphaAt(0.5, 0.5, 12, 1, { shape: "round", slantDeg: 0, texture: "grain" }),
+      stampAlphaAt(2.5, 1.5, 12, 1, { shape: "round", slantDeg: 0, texture: "grain" }),
+      stampAlphaAt(4.5, -2.5, 12, 1, { shape: "round", slantDeg: 0, texture: "grain" }),
+    ];
+    expect(grainSamples).toEqual([
+      stampAlphaAt(0.5, 0.5, 12, 1, { shape: "round", slantDeg: 0, texture: "grain" }),
+      stampAlphaAt(2.5, 1.5, 12, 1, { shape: "round", slantDeg: 0, texture: "grain" }),
+      stampAlphaAt(4.5, -2.5, 12, 1, { shape: "round", slantDeg: 0, texture: "grain" }),
+    ]);
+    expect(grainSamples.some((a) => a < 1)).toBe(true);
+    expect(grainSamples.every((a) => a > 0)).toBe(true);
+  });
+});
+
 describe("compositeDab", () => {
   it("writes opaque stroke at centre", () => {
     const w = 32;
@@ -88,6 +117,21 @@ describe("compositeDab", () => {
     compositeDab(data, w, h, 12, 12, 10, 0.5, 0.6, { r: 0, g: 0, b: 255, a: 255 });
     const afterSecond = data[(12 * w + 12) * 4 + 3] ?? 0;
     expect(afterSecond).toBeGreaterThanOrEqual(afterFirst);
+  });
+
+  it("uses brush shape options when compositing", () => {
+    const w = 16;
+    const h = 16;
+    const round = new Uint8ClampedArray(w * h * 4);
+    const square = new Uint8ClampedArray(w * h * 4);
+    const colour = { r: 40, g: 80, b: 120, a: 255 };
+
+    compositeDab(round, w, h, 8, 8, 3, 1, 1, colour, { shape: "round", slantDeg: 0, texture: "smooth" });
+    compositeDab(square, w, h, 8, 8, 3, 1, 1, colour, { shape: "square", slantDeg: 0, texture: "smooth" });
+
+    const cornerIdx = (10 * w + 10) * 4 + 3;
+    expect(round[cornerIdx]).toBe(0);
+    expect(square[cornerIdx]).toBeGreaterThan(0);
   });
 });
 

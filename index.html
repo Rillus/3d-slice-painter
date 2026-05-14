@@ -60,7 +60,7 @@
             </div>
             <label class="hud-brush__item">
               <span class="hud-brush__name">Size</span>
-              <input id="brush-size" type="range" min="4" max="120" value="32" />
+              <input id="brush-size" type="range" min="1" max="120" value="32" />
             </label>
             <label class="hud-brush__item">
               <span class="hud-brush__name">Opacity</span>
@@ -69,6 +69,26 @@
             <label class="hud-brush__item">
               <span class="hud-brush__name">Hardness</span>
               <input id="brush-hardness" type="range" min="0" max="100" value="65" />
+            </label>
+            <label class="hud-brush__item">
+              <span class="hud-brush__name">Shape</span>
+              <select id="brush-shape" class="hud__select" aria-label="Brush shape">
+                <option value="round" selected>Round</option>
+                <option value="square">Square</option>
+                <option value="diamond">Diamond</option>
+              </select>
+            </label>
+            <label class="hud-brush__item">
+              <span class="hud-brush__name">Slant</span>
+              <input id="brush-slant" type="range" min="-60" max="60" value="0" />
+            </label>
+            <label class="hud-brush__item">
+              <span class="hud-brush__name">Texture</span>
+              <select id="brush-texture" class="hud__select" aria-label="Brush texture">
+                <option value="smooth" selected>Smooth</option>
+                <option value="grain">Grain</option>
+                <option value="streak">Streak</option>
+              </select>
             </label>
           </div>
           <div id="colour-swatches" class="hud__swatches hud__swatches--toolbar" aria-label="Recent colours"></div>

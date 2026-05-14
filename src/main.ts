@@ -2,6 +2,7 @@ import "./style.css";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { compositeDab, compositeEraseDab, type RgbaByte } from "./brush/stamp.js";
+import { normaliseBrushParams, type BrushParams } from "./brush/params.js";
 import { dabSpacingForRadius, samplesAlongSegment } from "./brush/strokePath.js";
 import { formatHexRgb, parseHexRgba, swatchKeyFromRgba } from "./colour/hex.js";
 import { createRectOutlineLoop } from "./slices/outlineGeometry.js";
@@ -63,6 +64,9 @@ const canvas = getViewportCanvas();
 const brushSize = document.querySelector<HTMLInputElement>("#brush-size");
 const brushOpacity = document.querySelector<HTMLInputElement>("#brush-opacity");
 const brushHardness = document.querySelector<HTMLInputElement>("#brush-hardness");
+const brushShape = document.querySelector<HTMLSelectElement>("#brush-shape");
+const brushSlant = document.querySelector<HTMLInputElement>("#brush-slant");
+const brushTexture = document.querySelector<HTMLSelectElement>("#brush-texture");
 const modePaintBtn = document.querySelector<HTMLButtonElement>("#mode-paint");
 const modeNavigateBtn = document.querySelector<HTMLButtonElement>("#mode-navigate");
 const colourNative = document.querySelector<HTMLInputElement>("#colour-native");
@@ -1100,6 +1104,9 @@ function setInteractionMode(mode: InteractionMode): void {
     brushSize,
     brushOpacity,
     brushHardness,
+    brushShape,
+    brushSlant,
+    brushTexture,
     colourNative,
     colourHex,
     slicePrevBtn,
@@ -1124,15 +1131,15 @@ function setInteractionMode(mode: InteractionMode): void {
   updateSliceHud();
 }
 
-function readBrushParams(): { radiusPx: number; opacity: number; hardness: number } {
-  const size = Number(brushSize?.value ?? 32);
-  const opacityPct = Number(brushOpacity?.value ?? 85);
-  const hardnessPct = Number(brushHardness?.value ?? 65);
-  return {
-    radiusPx: Math.max(2, size),
-    opacity: Math.max(0, Math.min(1, opacityPct / 100)),
-    hardness: Math.max(0, Math.min(1, hardnessPct / 100)),
-  };
+function readBrushParams(): BrushParams {
+  return normaliseBrushParams({
+    size: brushSize?.value,
+    opacityPct: brushOpacity?.value,
+    hardnessPct: brushHardness?.value,
+    shape: brushShape?.value,
+    slantDeg: brushSlant?.value,
+    texture: brushTexture?.value,
+  });
 }
 
 function rayToCanvas(clientX: number, clientY: number): { cx: number; cy: number } | null {
@@ -1155,19 +1162,27 @@ function rayToCanvas(clientX: number, clientY: number): { cx: number; cy: number
 function dabCanvas(cx: number, cy: number): void {
   const active = getActiveSlice();
   if (!active) return;
-  const { radiusPx, opacity, hardness } = readBrushParams();
+  const { radiusPx, opacity, hardness, shape, slantDeg, texture } = readBrushParams();
   const data = active.imageData.data;
   if (brushColour.a === 0) {
-    compositeEraseDab(data, PAINT_RES, PAINT_RES, cx, cy, radiusPx, hardness, opacity);
+    compositeEraseDab(data, PAINT_RES, PAINT_RES, cx, cy, radiusPx, hardness, opacity, {
+      shape,
+      slantDeg,
+      texture,
+    });
   } else {
-    compositeDab(data, PAINT_RES, PAINT_RES, cx, cy, radiusPx, hardness, opacity, brushColour);
+    compositeDab(data, PAINT_RES, PAINT_RES, cx, cy, radiusPx, hardness, opacity, brushColour, {
+      shape,
+      slantDeg,
+      texture,
+    });
   }
 }
 
 function strokeCanvas(x0: number, y0: number, x1: number, y1: number, skipFirst: boolean): void {
   const active = getActiveSlice();
   if (!active) return;
-  const { radiusPx, opacity, hardness } = readBrushParams();
+  const { radiusPx, opacity, hardness, shape, slantDeg, texture } = readBrushParams();
   const step = dabSpacingForRadius(radiusPx);
   const pts = samplesAlongSegment(x0, y0, x1, y1, step);
   const start = skipFirst ? 1 : 0;
@@ -1177,9 +1192,17 @@ function strokeCanvas(x0: number, y0: number, x1: number, y1: number, skipFirst:
     const p = pts[i];
     if (!p) continue;
     if (erase) {
-      compositeEraseDab(data, PAINT_RES, PAINT_RES, p.x, p.y, radiusPx, hardness, opacity);
+      compositeEraseDab(data, PAINT_RES, PAINT_RES, p.x, p.y, radiusPx, hardness, opacity, {
+        shape,
+        slantDeg,
+        texture,
+      });
     } else {
-      compositeDab(data, PAINT_RES, PAINT_RES, p.x, p.y, radiusPx, hardness, opacity, brushColour);
+      compositeDab(data, PAINT_RES, PAINT_RES, p.x, p.y, radiusPx, hardness, opacity, brushColour, {
+        shape,
+        slantDeg,
+        texture,
+      });
     }
   }
 }

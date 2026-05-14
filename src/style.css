@@ -233,6 +233,11 @@ body {
   min-height: 32px;
 }
 
+.hud-brush__item .hud__select {
+  min-width: 7rem;
+  min-height: 36px;
+}
+
 .hud-brush__colour {
   display: flex;
   flex-direction: column;
