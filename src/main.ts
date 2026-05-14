@@ -24,20 +24,18 @@ import {
   tierMaxForIndex,
   type ScaleTierIndex,
 } from "./slices/sliceScaleTier.js";
-import { zipSync } from "fflate";
 import {
   buildProjectManifest,
-  serialiseManifest,
-  slicePngFilename,
+  type ProjectManifestV1,
 } from "./project/exportBundle.js";
+import { createProjectBundleZip, readProjectBundleZip } from "./project/projectBundle.js";
+import {
+  createLocalProjectStore,
+  type LocalProjectRecord,
+  type LocalProjectStore,
+} from "./project/localProjects.js";
 import { loadHudDockExpanded, saveHudDockExpanded, type HudDockId } from "./ui/hudDockPrefs.js";
 import { pushPreStrokeSnapshot } from "./paint/undoStack.js";
-import {
-  parseSessionPaintingJson,
-  serialiseSessionPainting,
-  SESSION_PAINTING_KEY,
-  type SessionSliceMetaV1,
-} from "./paint/sessionPainting.js";
 
 const PAINT_RES = 512;
 const PLANE_W = 2.4;
@@ -46,7 +44,10 @@ const MAX_SLICES = 128;
 const MAX_UNDO_STROKES = 24;
 const LS_COLOUR = "3dsp.brushColour";
 const LS_SWATCHES = "3dsp.swatches";
+const LEGACY_SESSION_PAINTING_KEY = "3dsp.sessionPainting.v1";
 const MAX_SWATCHES = 12;
+const DEFAULT_PROJECT_NAME = "Untitled project";
+const RECENT_PROJECT_LIMIT = 5;
 
 const SLICE_PLANE_POS_MIN = -3;
 const SLICE_PLANE_POS_MAX = 3;
@@ -88,7 +89,12 @@ const slicePlanePyOut = document.querySelector<HTMLOutputElement>("#slice-plane-
 const slicePlaneSxOut = document.querySelector<HTMLOutputElement>("#slice-plane-sx-out");
 const slicePlaneSyOut = document.querySelector<HTMLOutputElement>("#slice-plane-sy-out");
 const projectNewBtn = document.querySelector<HTMLButtonElement>("#project-new");
+const projectSaveBtn = document.querySelector<HTMLButtonElement>("#project-save");
+const projectLoadBtn = document.querySelector<HTMLButtonElement>("#project-load");
+const projectLoadInput = document.querySelector<HTMLInputElement>("#project-load-input");
 const projectExportBtn = document.querySelector<HTMLButtonElement>("#project-export");
+const projectStatus = document.querySelector<HTMLDivElement>("#project-status");
+const projectRecentList = document.querySelector<HTMLDivElement>("#project-recent-list");
 
 type InteractionMode = "paint" | "navigate";
 let interactionMode: InteractionMode = "paint";
@@ -96,6 +102,20 @@ let interactionMode: InteractionMode = "paint";
 let brushColour: RgbaByte = { r: 200, g: 55, b: 48, a: 255 };
 let swatches: string[] = [];
 let lastPaintCanvas: { cx: number; cy: number } | null = null;
+let currentLocalProjectId: string | undefined;
+let currentProjectName = DEFAULT_PROJECT_NAME;
+let localProjectStore: LocalProjectStore | null = null;
+let localSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let localSaveInProgress = false;
+let localSaveQueued = false;
+let lastLocalSaveError = false;
+let recentThumbnailUrls: string[] = [];
+
+try {
+  localProjectStore = createLocalProjectStore();
+} catch (err) {
+  console.warn("IndexedDB project storage is unavailable", err);
+}
 
 function loadStoredColour(): void {
   try {
@@ -630,22 +650,17 @@ function downloadBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
-function imageDataToPngDataUrlSync(data: ImageData): string {
-  const c = document.createElement("canvas");
-  c.width = data.width;
-  c.height = data.height;
-  const ctx = c.getContext("2d");
-  if (!ctx) return "";
-  ctx.putImageData(data, 0, 0);
-  return c.toDataURL("image/png");
-}
-
-function decodePngDataUrlToImageData(dataUrl: string, w: number, h: number): Promise<ImageData | null> {
+function decodePngBlobToImageData(blob: Blob, w: number, h: number): Promise<ImageData | null> {
   return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const finish = (value: ImageData | null) => {
+      URL.revokeObjectURL(url);
+      resolve(value);
+    };
     const img = new Image();
     img.onload = () => {
       if (img.naturalWidth !== w || img.naturalHeight !== h) {
-        resolve(null);
+        finish(null);
         return;
       }
       const c = document.createElement("canvas");
@@ -653,138 +668,336 @@ function decodePngDataUrlToImageData(dataUrl: string, w: number, h: number): Pro
       c.height = h;
       const ctx = c.getContext("2d");
       if (!ctx) {
-        resolve(null);
+        finish(null);
         return;
       }
       ctx.drawImage(img, 0, 0);
-      resolve(ctx.getImageData(0, 0, w, h));
+      finish(ctx.getImageData(0, 0, w, h));
     };
-    img.onerror = () => resolve(null);
-    img.src = dataUrl;
+    img.onerror = () => finish(null);
+    img.src = url;
   });
 }
 
-function clearSessionPaintingStorage(): void {
+function clearLegacySessionPaintingStorage(): void {
   try {
-    localStorage.removeItem(SESSION_PAINTING_KEY);
+    localStorage.removeItem(LEGACY_SESSION_PAINTING_KEY);
   } catch {
     /* ignore */
   }
 }
 
-let sessionPaintSaveTimer: ReturnType<typeof setTimeout> | null = null;
-
-function persistPaintingSessionSync(): void {
-  if (slices.length === 0) return;
-  const layers: string[] = [];
-  for (const s of slices) {
-    const url = imageDataToPngDataUrlSync(s.imageData);
-    if (!url) return;
-    layers.push(url);
-  }
-  const sliceMeta: SessionSliceMetaV1[] = slices.map((s) => ({
-    along: s.alongStackOffset,
-    px: s.planeOffsetX,
-    py: s.planeOffsetY,
-    sx: s.planeScaleX,
-    sy: s.planeScaleY,
-    qx: s.stackQuaternion.x,
-    qy: s.stackQuaternion.y,
-    qz: s.stackQuaternion.z,
-    qw: s.stackQuaternion.w,
-    facing: s.sliceFacingSelectValue,
-    tsx: s.scaleSliderTierX,
-    tsy: s.scaleSliderTierY,
-  }));
-  try {
-    localStorage.setItem(
-      SESSION_PAINTING_KEY,
-      serialiseSessionPainting({
-        v: 1,
-        w: PAINT_RES,
-        h: PAINT_RES,
-        layers,
-        spacingWorld: sliceSpacingWorld,
-        activeSliceIndex,
-        sliceMeta,
-      }),
-    );
-  } catch {
-    /* quota exceeded or storage disabled */
-  }
+function setProjectStatus(message: string): void {
+  if (projectStatus) projectStatus.textContent = message;
 }
 
-function schedulePersistPaintingSession(): void {
-  if (sessionPaintSaveTimer !== null) clearTimeout(sessionPaintSaveTimer);
-  sessionPaintSaveTimer = setTimeout(() => {
-    sessionPaintSaveTimer = null;
-    persistPaintingSessionSync();
-  }, 400);
-}
-
-async function restorePaintingFromStorageIfPresent(): Promise<void> {
-  let raw: string | null = null;
-  try {
-    raw = localStorage.getItem(SESSION_PAINTING_KEY);
-  } catch {
-    return;
-  }
-  if (!raw) return;
-  const parsed = parseSessionPaintingJson(raw);
-  if (!parsed || parsed.w !== PAINT_RES || parsed.h !== PAINT_RES) return;
-  const L = parsed.layers.length;
-  if (L < 1 || L > MAX_SLICES) return;
-
-  const decoded = await Promise.all(
-    parsed.layers.map((url) => decodePngDataUrlToImageData(url, PAINT_RES, PAINT_RES)),
+function projectManifestForCurrentArtwork(exportedAt: string): ProjectManifestV1 {
+  const s0 = slices[0];
+  const orientationCardinal =
+    s0 && isCardinalPreset(s0.sliceFacingSelectValue) ? s0.sliceFacingSelectValue : null;
+  return buildProjectManifest(
+    {
+      sliceCount: slices.length,
+      spacingWorld: sliceSpacingWorld,
+      canvasSize: PAINT_RES,
+      planeWidthWorld: PLANE_W,
+      planeHeightWorld: PLANE_H,
+      stackQuaternion: s0
+        ? {
+            x: s0.stackQuaternion.x,
+            y: s0.stackQuaternion.y,
+            z: s0.stackQuaternion.z,
+            w: s0.stackQuaternion.w,
+          }
+        : undefined,
+      sliceStackQuaternions: slices.map((s) => ({
+        x: s.stackQuaternion.x,
+        y: s.stackQuaternion.y,
+        z: s.stackQuaternion.z,
+        w: s.stackQuaternion.w,
+      })),
+      orientationCardinal,
+      sliceOrientationCardinals: slices.map((s) =>
+        isCardinalPreset(s.sliceFacingSelectValue) ? s.sliceFacingSelectValue : null,
+      ),
+      sliceAlongStackOffsets: slices.map((s) => s.alongStackOffset),
+      slicePlaneOffsetX: slices.map((s) => s.planeOffsetX),
+      slicePlaneOffsetY: slices.map((s) => s.planeOffsetY),
+      slicePlaneScaleX: slices.map((s) => s.planeScaleX),
+      slicePlaneScaleY: slices.map((s) => s.planeScaleY),
+    },
+    exportedAt,
   );
-  if (decoded.some((d) => !d)) return;
+}
 
+async function buildCurrentProjectBundle(now = new Date()): Promise<{ manifest: ProjectManifestV1; zipBlob: Blob }> {
+  if (slices.length === 0) throw new Error("No slices to save");
+  const pngSlices: Uint8Array[] = [];
+  for (const s of slices) {
+    const blob = await imageDataToPngBlob(s.imageData);
+    pngSlices.push(new Uint8Array(await blob.arrayBuffer()));
+  }
+  const manifest = projectManifestForCurrentArtwork(now.toISOString());
+  const zipped = createProjectBundleZip({ manifest, pngSlices });
+  return { manifest, zipBlob: new Blob([zipped], { type: "application/zip" }) };
+}
+
+function imageDataToThumbnailBlob(data: ImageData): Promise<Blob> {
+  const source = document.createElement("canvas");
+  source.width = data.width;
+  source.height = data.height;
+  const sourceCtx = source.getContext("2d");
+  if (!sourceCtx) return Promise.reject(new Error("2D context unavailable"));
+  sourceCtx.putImageData(data, 0, 0);
+
+  const size = 96;
+  const thumb = document.createElement("canvas");
+  thumb.width = size;
+  thumb.height = size;
+  const thumbCtx = thumb.getContext("2d");
+  if (!thumbCtx) return Promise.reject(new Error("2D context unavailable"));
+  thumbCtx.clearRect(0, 0, size, size);
+  thumbCtx.drawImage(source, 0, 0, size, size);
+  return new Promise((resolve, reject) => {
+    thumb.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("Thumbnail encoding failed"));
+    }, "image/png");
+  });
+}
+
+function applyProjectManifestToSlices(manifest: ProjectManifestV1, decoded: ImageData[]): void {
   if (sliceFrame.parent) sliceFrame.parent.remove(sliceFrame);
   for (const s of slices) disposeSlice(s);
   slices.length = 0;
-  for (let i = 0; i < L; i++) slices.push(createSliceState());
-  for (let i = 0; i < L; i++) {
+  for (let i = 0; i < decoded.length; i++) slices.push(createSliceState());
+  for (let i = 0; i < decoded.length; i++) {
     const s = slices[i]!;
-    const id = decoded[i]!;
-    if (!id) continue;
-    s.imageData.data.set(id.data);
+    s.imageData.data.set(decoded[i]!.data);
     s.undoStack.length = 0;
     flushSliceTexture(s);
   }
 
-  if (parsed.sliceMeta && parsed.sliceMeta.length === L) {
-    for (let i = 0; i < L; i++) {
-      const s = slices[i]!;
-      const m = parsed.sliceMeta[i]!;
-      s.alongStackOffset = m.along;
-      s.planeOffsetX = m.px;
-      s.planeOffsetY = m.py;
-      s.planeScaleX = m.sx;
-      s.planeScaleY = m.sy;
-      s.stackQuaternion.set(m.qx, m.qy, m.qz, m.qw);
+  for (let i = 0; i < decoded.length; i++) {
+    const s = slices[i]!;
+    s.alongStackOffset = manifest.sliceAlongStackOffsets?.[i] ?? 0;
+    s.planeOffsetX = manifest.slicePlaneOffsetX?.[i] ?? 0;
+    s.planeOffsetY = manifest.slicePlaneOffsetY?.[i] ?? 0;
+    s.planeScaleX = manifest.slicePlaneScaleX?.[i] ?? 1;
+    s.planeScaleY = manifest.slicePlaneScaleY?.[i] ?? 1;
+
+    const q = manifest.sliceStackQuaternions?.[i] ?? manifest.stackQuaternion;
+    if (q) {
+      s.stackQuaternion.set(q.x, q.y, q.z, q.w);
       s.stackQuaternion.normalize();
-      s.sliceFacingSelectValue = m.facing;
-      const tx = m.tsx !== undefined ? clampTierIndex(m.tsx) : inferTierFromMeshScale(s.planeScaleX);
-      const ty = m.tsy !== undefined ? clampTierIndex(m.tsy) : inferTierFromMeshScale(s.planeScaleY);
-      s.scaleSliderTierX = bumpTierUpUntilMeshFits(tx, s.planeScaleX);
-      s.scaleSliderTierY = bumpTierUpUntilMeshFits(ty, s.planeScaleY);
     }
+
+    const facing = manifest.sliceOrientationCardinals?.[i] ?? manifest.orientationCardinal;
+    if (facing && isCardinalPreset(facing)) {
+      s.sliceFacingSelectValue = facing;
+    } else if (q) {
+      s.sliceFacingSelectValue = "viewport_action";
+    }
+    s.scaleSliderTierX = bumpTierUpUntilMeshFits(inferTierFromMeshScale(s.planeScaleX), s.planeScaleX);
+    s.scaleSliderTierY = bumpTierUpUntilMeshFits(inferTierFromMeshScale(s.planeScaleY), s.planeScaleY);
   }
-  if (parsed.spacingWorld !== undefined && Number.isFinite(parsed.spacingWorld)) {
-    sliceSpacingWorld = Math.max(0.001, parsed.spacingWorld);
-    if (sliceSpacingInput) sliceSpacingInput.value = String(sliceSpacingWorld);
-  }
-  if (parsed.activeSliceIndex !== undefined && Number.isFinite(parsed.activeSliceIndex)) {
-    const ai = Math.floor(parsed.activeSliceIndex);
-    activeSliceIndex = Math.max(0, Math.min(L - 1, ai));
-  } else {
-    activeSliceIndex = Math.max(0, Math.min(L - 1, activeSliceIndex));
-  }
+
+  sliceSpacingWorld = Math.max(0.001, manifest.spacingWorld);
+  if (sliceSpacingInput) sliceSpacingInput.value = String(sliceSpacingWorld);
+  activeSliceIndex = 0;
   attachFrameToActiveSlice();
   updateSliceTransforms();
   updateSliceHud();
   syncUndoButton();
+}
+
+async function applyProjectBundleBytes(bytes: Uint8Array): Promise<ProjectManifestV1> {
+  const bundle = readProjectBundleZip(bytes);
+  const { manifest } = bundle;
+  if (manifest.canvasSize !== PAINT_RES) {
+    throw new Error(`Unsupported canvas size ${manifest.canvasSize}px; expected ${PAINT_RES}px`);
+  }
+  if (manifest.sliceCount < 1 || manifest.sliceCount > MAX_SLICES) {
+    throw new Error(`Unsupported slice count ${manifest.sliceCount}`);
+  }
+  const decoded = await Promise.all(
+    bundle.slices.map((slice) =>
+      decodePngBlobToImageData(new Blob([slice.bytes], { type: "image/png" }), PAINT_RES, PAINT_RES),
+    ),
+  );
+  if (decoded.some((imageData) => imageData === null)) {
+    throw new Error("Project bundle contains an unreadable PNG slice");
+  }
+  applyProjectManifestToSlices(manifest, decoded as ImageData[]);
+  return manifest;
+}
+
+function schedulePersistPaintingSession(): void {
+  if (!localProjectStore) return;
+  if (localSaveTimer !== null) clearTimeout(localSaveTimer);
+  localSaveTimer = setTimeout(() => {
+    localSaveTimer = null;
+    void saveCurrentProjectToIndexedDb({ name: currentProjectName, explicit: false });
+  }, 900);
+}
+
+async function renderRecentProjects(): Promise<void> {
+  if (!projectRecentList) return;
+  for (const url of recentThumbnailUrls) URL.revokeObjectURL(url);
+  recentThumbnailUrls = [];
+  projectRecentList.replaceChildren();
+  if (!localProjectStore) {
+    projectRecentList.textContent = "IndexedDB storage is unavailable.";
+    return;
+  }
+  const recents = await localProjectStore.listRecentProjects(RECENT_PROJECT_LIMIT);
+  if (recents.length === 0) {
+    projectRecentList.textContent = "No local projects yet.";
+    return;
+  }
+  for (const project of recents) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "hud__recent-project";
+    btn.title = `Load ${project.name}`;
+    if (project.thumbnailBlob) {
+      const img = document.createElement("img");
+      const url = URL.createObjectURL(project.thumbnailBlob);
+      recentThumbnailUrls.push(url);
+      img.src = url;
+      img.alt = "";
+      btn.appendChild(img);
+    }
+    const text = document.createElement("span");
+    text.className = "hud__recent-project-text";
+    const name = document.createElement("strong");
+    name.textContent = project.name;
+    const date = document.createElement("small");
+    date.textContent = new Date(project.updatedAt).toLocaleString(undefined, {
+      dateStyle: "short",
+      timeStyle: "short",
+    });
+    text.append(name, date);
+    btn.appendChild(text);
+    btn.addEventListener("click", () => {
+      void loadRecentProject(project.id);
+    });
+    projectRecentList.appendChild(btn);
+  }
+}
+
+async function saveCurrentProjectToIndexedDb(options: { name: string; explicit: boolean }): Promise<void> {
+  if (!localProjectStore || slices.length === 0) return;
+  if (localSaveInProgress) {
+    localSaveQueued = true;
+    return;
+  }
+
+  localSaveInProgress = true;
+  projectSaveBtn?.setAttribute("aria-busy", "true");
+  if (options.explicit && projectSaveBtn) projectSaveBtn.disabled = true;
+  try {
+    const now = new Date();
+    const { manifest, zipBlob } = await buildCurrentProjectBundle(now);
+    const thumbnailBlob = slices[0] ? await imageDataToThumbnailBlob(slices[0].imageData) : undefined;
+    const saved = await localProjectStore.saveProject({
+      id: currentLocalProjectId,
+      name: options.name,
+      manifest,
+      bundleBlob: zipBlob,
+      thumbnailBlob,
+      now,
+    });
+    currentLocalProjectId = saved.id;
+    currentProjectName = saved.name;
+    lastLocalSaveError = false;
+    setProjectStatus(`Saved locally: ${currentProjectName}`);
+    await renderRecentProjects();
+  } catch (err) {
+    console.error(err);
+    lastLocalSaveError = true;
+    setProjectStatus("Local save failed.");
+    if (options.explicit) window.alert("Save failed. IndexedDB may be unavailable or full.");
+  } finally {
+    localSaveInProgress = false;
+    projectSaveBtn?.removeAttribute("aria-busy");
+    if (projectSaveBtn) projectSaveBtn.disabled = localProjectStore === null;
+  }
+
+  if (localSaveQueued) {
+    localSaveQueued = false;
+    await saveCurrentProjectToIndexedDb({ name: currentProjectName, explicit: false });
+  }
+}
+
+async function saveProject(): Promise<void> {
+  const requestedName = window.prompt("Project name", currentProjectName);
+  if (requestedName === null) return;
+  const name = requestedName.trim() || DEFAULT_PROJECT_NAME;
+  await saveCurrentProjectToIndexedDb({ name, explicit: true });
+}
+
+function basenameProjectName(filename: string): string {
+  const trimmed = filename.replace(/\.[^.]+$/, "").trim();
+  return trimmed || DEFAULT_PROJECT_NAME;
+}
+
+async function loadProjectFile(file: File): Promise<void> {
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    await applyProjectBundleBytes(bytes);
+    currentLocalProjectId = undefined;
+    currentProjectName = basenameProjectName(file.name);
+    setProjectStatus(`Loaded: ${currentProjectName}`);
+    await saveCurrentProjectToIndexedDb({ name: currentProjectName, explicit: false });
+  } catch (err) {
+    console.error(err);
+    window.alert("Load failed. Choose a valid 3D Slice Painter project ZIP.");
+  }
+}
+
+async function loadRecentProject(id: string): Promise<void> {
+  if (!localProjectStore) return;
+  try {
+    const project = await localProjectStore.loadProject(id);
+    if (!project) throw new Error("Project not found");
+    await applyProjectBundleBytes(new Uint8Array(await project.bundleBlob.arrayBuffer()));
+    currentLocalProjectId = project.id;
+    currentProjectName = project.name;
+    setProjectStatus(`Loaded: ${currentProjectName}`);
+  } catch (err) {
+    console.error(err);
+    window.alert("Load failed. The local project may be corrupt or unavailable.");
+  }
+}
+
+async function restoreLatestLocalProjectIfPresent(): Promise<void> {
+  clearLegacySessionPaintingStorage();
+  if (!localProjectStore) {
+    setProjectStatus("IndexedDB storage is unavailable.");
+    return;
+  }
+  await renderRecentProjects();
+  try {
+    const [recent] = await localProjectStore.listRecentProjects(1);
+    if (!recent) {
+      setProjectStatus("No local project saved yet.");
+      return;
+    }
+    const project = await localProjectStore.loadProject(recent.id);
+    if (!project) return;
+    await restoreLocalProject(project);
+  } catch (err) {
+    console.warn("Unable to restore the latest local project", err);
+    if (!lastLocalSaveError) setProjectStatus("Could not restore recent project.");
+  }
+}
+
+async function restoreLocalProject(project: LocalProjectRecord): Promise<void> {
+  await applyProjectBundleBytes(new Uint8Array(await project.bundleBlob.arrayBuffer()));
+  currentLocalProjectId = project.id;
+  currentProjectName = project.name;
+  setProjectStatus(`Loaded: ${currentProjectName}`);
 }
 
 function newProject(): void {
@@ -808,10 +1021,13 @@ function newProject(): void {
   activeSliceIndex = 0;
   sliceSpacingWorld = 0.12;
   if (sliceSpacingInput) sliceSpacingInput.value = "0.12";
+  currentLocalProjectId = undefined;
+  currentProjectName = DEFAULT_PROJECT_NAME;
   updateSliceTransforms();
   attachFrameToActiveSlice();
   updateSliceHud();
-  clearSessionPaintingStorage();
+  schedulePersistPaintingSession();
+  setProjectStatus("New unsaved project.");
 }
 
 let exportInProgress = false;
@@ -822,53 +1038,7 @@ async function exportProject(): Promise<void> {
   projectExportBtn?.setAttribute("aria-busy", "true");
   if (projectExportBtn) projectExportBtn.disabled = true;
   try {
-    const entries: Record<string, Uint8Array> = {};
-    for (let i = 0; i < slices.length; i++) {
-      const s = slices[i];
-      if (!s) continue;
-      const blob = await imageDataToPngBlob(s.imageData);
-      const buf = new Uint8Array(await blob.arrayBuffer());
-      entries[slicePngFilename(i)] = buf;
-    }
-    const s0 = slices[0];
-    const orientationCardinal =
-      s0 && isCardinalPreset(s0.sliceFacingSelectValue) ? s0.sliceFacingSelectValue : null;
-    const manifest = buildProjectManifest(
-      {
-        sliceCount: slices.length,
-        spacingWorld: sliceSpacingWorld,
-        canvasSize: PAINT_RES,
-        planeWidthWorld: PLANE_W,
-        planeHeightWorld: PLANE_H,
-        stackQuaternion: s0
-          ? {
-              x: s0.stackQuaternion.x,
-              y: s0.stackQuaternion.y,
-              z: s0.stackQuaternion.z,
-              w: s0.stackQuaternion.w,
-            }
-          : undefined,
-        sliceStackQuaternions: slices.map((s) => ({
-          x: s.stackQuaternion.x,
-          y: s.stackQuaternion.y,
-          z: s.stackQuaternion.z,
-          w: s.stackQuaternion.w,
-        })),
-        orientationCardinal,
-        sliceOrientationCardinals: slices.map((s) =>
-          isCardinalPreset(s.sliceFacingSelectValue) ? s.sliceFacingSelectValue : null,
-        ),
-        sliceAlongStackOffsets: slices.map((s) => s.alongStackOffset),
-        slicePlaneOffsetX: slices.map((s) => s.planeOffsetX),
-        slicePlaneOffsetY: slices.map((s) => s.planeOffsetY),
-        slicePlaneScaleX: slices.map((s) => s.planeScaleX),
-        slicePlaneScaleY: slices.map((s) => s.planeScaleY),
-      },
-      new Date().toISOString(),
-    );
-    entries["project.json"] = new TextEncoder().encode(serialiseManifest(manifest));
-    const zipped = zipSync(entries, { level: 6 });
-    const zipBlob = new Blob([zipped], { type: "application/zip" });
+    const { zipBlob } = await buildCurrentProjectBundle();
     const stamp = new Date().toISOString().replaceAll(":", "-").replace("T", "_").slice(0, 19);
     downloadBlob(zipBlob, `slice-painter_${stamp}.zip`);
   } catch (err) {
@@ -1104,6 +1274,17 @@ sliceOrientViewportBtn?.addEventListener("click", () => {
 });
 
 projectNewBtn?.addEventListener("click", () => newProject());
+projectSaveBtn?.addEventListener("click", () => {
+  void saveProject();
+});
+projectLoadBtn?.addEventListener("click", () => {
+  projectLoadInput?.click();
+});
+projectLoadInput?.addEventListener("change", () => {
+  const file = projectLoadInput.files?.[0];
+  projectLoadInput.value = "";
+  if (file) void loadProjectFile(file);
+});
 projectExportBtn?.addEventListener("click", () => {
   void exportProject();
 });
@@ -1233,12 +1414,9 @@ function tick(): void {
   renderer.render(scene, camera);
 }
 
-window.addEventListener("beforeunload", () => {
-  persistPaintingSessionSync();
-});
-
 void (async () => {
-  await restorePaintingFromStorageIfPresent();
+  if (projectSaveBtn) projectSaveBtn.disabled = localProjectStore === null;
+  await restoreLatestLocalProjectIfPresent();
   setInteractionMode("paint");
   renderSwatches();
   initHudDocks();
